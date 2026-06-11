@@ -137,7 +137,7 @@ html.dark #channel-detail-modal .hover\:bg-indigo-100:hover { background: #312e8
 </style>
 <div class="px-2 py-1 md:py-4 flex-1 min-h-0 flex flex-col h-[calc(100dvh-var(--header-h,56px))]">
     {% if workspace_invalid %}
-    <div class="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg px-4 py-3 mb-4 flex-shrink-0">
+    <div id="workspace-invalid-banner" class="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg px-4 py-3 mb-4 flex-shrink-0">
         <div class="flex items-start gap-3">
             <svg class="w-5 h-5 text-amber-500 dark:text-amber-400 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86l-8.6 14.86A1 1 0 002.56 20h18.88a1 1 0 00.87-1.5l-8.6-14.86a1 1 0 00-1.74 0z"/>
@@ -160,13 +160,12 @@ html.dark #channel-detail-modal .hover\:bg-indigo-100:hover { background: #312e8
             <a href="/agents" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
             </a>
-            <h2 class="text-xl font-bold text-gray-800 dark:text-gray-100">{{ agent.name }}</h2>
-            {% if not agent.is_super %}
-            <span class="text-xs text-gray-400 bg-gray-100 dark:bg-gray-700 dark:text-gray-400 px-2 py-0.5 rounded font-mono">{{ agent.id }}</span>
-            {% endif %}
+            <h2 id="agent-header-name" class="text-xl font-bold text-gray-800 dark:text-gray-100">{{ agent.name }}</h2>
+            {# Always rendered (hidden for super) so softSwitchAgent can toggle without a full reload #}
+            <span id="agent-header-id-badge" class="text-xs text-gray-400 bg-gray-100 dark:bg-gray-700 dark:text-gray-400 px-2 py-0.5 rounded font-mono{{ ' hidden' if agent.is_super else '' }}">{{ agent.id }}</span>
         </div>
-        {% if not agent.is_super %}
-        <div class="relative" id="gear-dropdown-wrap">
+        {# Always rendered (hidden for super) so softSwitchAgent can toggle without a full reload #}
+        <div class="relative{{ ' hidden' if agent.is_super else '' }}" id="gear-dropdown-wrap">
             <button onclick="toggleGearDropdown()" class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-500 hover:text-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-gray-400 dark:hover:text-gray-200 rounded-md transition-colors" title="Agent actions" id="gear-btn">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
             </button>
@@ -185,7 +184,6 @@ html.dark #channel-detail-modal .hover\:bg-indigo-100:hover { background: #312e8
                 </button>
             </div>
         </div>
-        {% endif %}
     </div>
     <!-- Tabs -->
     <div class="flex gap-1 mb-6 border-b border-gray-200 dark:border-gray-700 overflow-x-auto flex-shrink-0" style="-webkit-overflow-scrolling: touch;">
@@ -193,9 +191,8 @@ html.dark #channel-detail-modal .hover\:bg-indigo-100:hover { background: #312e8
         <button class="tab-btn flex-shrink-0 whitespace-nowrap px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" onclick="showTab('general')" data-tab="general">Settings</button>
         <button class="tab-btn flex-shrink-0 whitespace-nowrap px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" onclick="showTab('knowledge')" data-tab="knowledge">Knowledge</button>
         <button class="tab-btn flex-shrink-0 whitespace-nowrap px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" onclick="showTab('tools')" data-tab="tools">Tools</button>
-        {% if not agent.is_super %}
-        <button class="tab-btn flex-shrink-0 whitespace-nowrap px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" onclick="showTab('skills')" data-tab="skills">Skills</button>
-        {% endif %}
+        {# Always rendered (hidden for super) so softSwitchAgent can toggle without a full reload #}
+        <button class="tab-btn flex-shrink-0 whitespace-nowrap px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700{{ ' hidden' if agent.is_super else '' }}" onclick="showTab('skills')" data-tab="skills">Skills</button>
         <button class="tab-btn flex-shrink-0 whitespace-nowrap px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" onclick="showTab('channels')" data-tab="channels">Channels</button>
         <button class="tab-btn flex-shrink-0 whitespace-nowrap px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" onclick="showTab('portals')" data-tab="portals">Portals</button>
         {% if agent.artifacts_enabled %}
@@ -526,12 +523,10 @@ html.dark #channel-detail-modal .hover\:bg-indigo-100:hover { background: #312e8
                 <!-- Dynamically populated -->
             </div>
             <div id="tools-empty" class="hidden text-center py-8 text-gray-400 text-sm">No tools found.</div>
-            <span id="tools-save-status" class="mt-2 inline-block text-sm text-green-600 hidden">Saved!</span>
         </div>
     </div>
 
-    <!-- Skills Tab -->
-    {% if not agent.is_super %}
+    <!-- Skills Tab (always rendered; button hidden for super so it's unreachable there) -->
     <div id="tab-skills" class="tab-content hidden flex-1 min-h-0 overflow-y-auto">
         <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-600 p-6 max-w-3xl">
             <h3 class="text-base font-semibold text-gray-800 dark:text-gray-100 mb-1">Skills</h3>
@@ -543,7 +538,6 @@ html.dark #channel-detail-modal .hover\:bg-indigo-100:hover { background: #312e8
             <span id="skills-save-status" class="mt-2 inline-block text-sm text-green-600 hidden">Saved!</span>
         </div>
     </div>
-    {% endif %}
 
     <!-- Channels Tab -->
     <div id="tab-channels" class="tab-content hidden flex-1 min-h-0 overflow-y-auto">
@@ -587,10 +581,10 @@ html.dark #channel-detail-modal .hover\:bg-indigo-100:hover { background: #312e8
                     <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
                     </svg>
-                    <input type="text" id="artifacts-search" placeholder="Search artifacts..." oninput="filterArtifacts()"
+                    <input type="search" id="artifacts-search" name="artifacts_search_filter" placeholder="Search artifacts..." oninput="filterArtifacts()" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')"
                         class="w-full pl-10 pr-3 py-2 border border-gray-300 rounded-md text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 dark:bg-gray-700 dark:text-gray-100">
                 </div>
-                <select id="artifacts-sort" onchange="loadArtifacts()"
+                <select id="artifacts-sort" onchange="_artifactsPage=1; loadArtifacts()"
                     class="p-2 border border-gray-300 rounded-md text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 dark:bg-gray-700 dark:text-gray-100">
                     <option value="newest">Newest</option>
                     <option value="updated">Last Updated</option>
@@ -615,6 +609,32 @@ html.dark #channel-detail-modal .hover\:bg-indigo-100:hover { background: #312e8
                 <!-- Artifacts loaded dynamically -->
             </div>
 
+            <!-- Pagination Controls -->
+            <div id="artifacts-pagination" class="hidden flex items-center justify-between mt-4 pt-3 border-t border-gray-200 dark:border-gray-600">
+                <div class="text-sm text-gray-500 dark:text-gray-400">
+                    <span id="artifacts-pagination-info"></span>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button id="artifacts-prev-btn" onclick="goArtifactPage('prev')"
+                        class="px-3 py-1.5 text-sm font-medium text-gray-600 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                        <span class="flex items-center gap-1">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
+                            Previous
+                        </span>
+                    </button>
+                    <div class="flex items-center gap-1" id="artifacts-page-buttons">
+                        <!-- Page buttons rendered dynamically -->
+                    </div>
+                    <button id="artifacts-next-btn" onclick="goArtifactPage('next')"
+                        class="px-3 py-1.5 text-sm font-medium text-gray-600 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                        <span class="flex items-center gap-1">
+                            Next
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
+                        </span>
+                    </button>
+                </div>
+            </div>
+
             <!-- Empty State -->
             <div id="artifacts-empty" class="hidden text-center py-12 text-gray-400">
                 <svg class="w-12 h-12 mx-auto mb-3 text-gray-300 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -634,8 +654,8 @@ html.dark #channel-detail-modal .hover\:bg-indigo-100:hover { background: #312e8
                 <div class="flex justify-between items-center p-4 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
                     <h3 id="chatPanelTitle" class="text-base font-semibold text-gray-800 dark:text-gray-100 truncate max-w-[200px] sm:max-w-[320px] flex items-center gap-1.5">
                         <img id="agent-avatar-header" src="/api/agents/{{ agent.id }}/avatar" alt="" class="w-6 h-6 rounded-full object-cover bg-indigo-50 dark:bg-indigo-900/20 flex-shrink-0" onerror="this.style.display='none'">
-                        <span class="truncate">{{ agent.name }}</span>
-                        <span id="homePulseIcon" class="hidden inline-block w-2.5 h-2.5 rounded-full animate-pulse flex-shrink-0"></span>
+                        <span id="chat-panel-agent-name" class="truncate">{{ agent.name }}</span>
+                        <span id="homeWorkplaceBadge" class="hidden"></span>
                     </h3>
                     <div class="flex gap-3 items-center">
                         <button onclick="showCompiledPrompt()" class="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-1" title="System Prompt">
@@ -962,8 +982,8 @@ html.dark #channel-detail-modal .hover\:bg-indigo-100:hover { background: #312e8
             <h3 class="text-gray-800 font-semibold dark:text-gray-100">Editing: <span id="kb-editor-filename" class="font-mono text-indigo-600"></span></h3>
             <button onclick="closeEditor()" class="bg-transparent border-none text-gray-400 text-2xl cursor-pointer hover:text-gray-800">&times;</button>
         </div>
-        <div class="p-5 flex-1 overflow-hidden flex flex-col">
-            <textarea id="kb-editor-content" class="flex-1 w-full p-3 border border-gray-300 rounded-md text-sm font-mono resize-none focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10" style="min-height: 300px;"></textarea>
+        <div class="p-5 flex-1 overflow-y-auto flex flex-col">
+            <textarea id="kb-editor-content" class="w-full p-3 border border-gray-300 rounded-md text-sm font-mono resize-none focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 dark:bg-gray-700 dark:text-gray-100 dark:border-gray-600" style="min-height: 300px; max-height: 65vh; overflow-y: auto;" oninput="autoGrowKBTextarea(this)"></textarea>
         </div>
         <div class="flex gap-3 justify-end p-5 border-t border-gray-200">
             <button onclick="closeEditor()" class="px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-600 hover:bg-gray-50 dark:text-gray-200 dark:hover:text-gray-50 dark:hover:bg-gray-400">Cancel</button>
@@ -1185,8 +1205,8 @@ html.dark #channel-detail-modal .hover\:bg-indigo-100:hover { background: #312e8
     </div>
 </div>
 
-<script src="{{ url_for('static', filename='js/chat-ui.js') }}?v=42"></script>
-<script src="{{ url_for('static', filename='js/agent-state.js') }}?v=3"></script>
+<script src="{{ url_for('static', filename='js/chat-ui.js') }}?v=43" defer></script>
+<script src="{{ url_for('static', filename='js/agent-state.js') }}?v=3" defer></script>
 <script>
 function showToast(message, type = 'success') {
     const container = document.getElementById('toast-container');
@@ -1207,25 +1227,35 @@ function showToast(message, type = 'success') {
 }
 </script>
 <script>
-const AGENT_ID = '{{ agent.id }}';
-const ENABLE_AGENT_STATE = {{ 'true' if agent.enable_agent_state else 'false' }};
+// AGENT_ID/ENABLE_AGENT_STATE are mutable: softSwitchAgent() retargets the page
+// to another agent without a full reload. _agentEpoch invalidates in-flight
+// fetches that started before a switch.
+let AGENT_ID = '{{ agent.id }}';
+let ENABLE_AGENT_STATE = {{ 'true' if agent.enable_agent_state else 'false' }};
+window._agentEpoch = 0;
+window._softSwitched = false;
 const ORIGINAL_WORKSPACE = '{{ agent.workspace or '' }}';
+const ARTIFACTS_ENABLED = {{ 'true' if agent.artifacts_enabled else 'false' }};
+// Tools managed exclusively by the Artifacts (Saved Files) toggle in agent settings.
+// They are read-only in the Tools tab — cannot be toggled manually.
+const ARTIFACT_TOOL_IDS = ['save_artifact', 'list_artifacts', 'read_attachment', 'cleanup_attachments', 'portal_copy', 'copy_status'];
 let currentEditFile = null;
 let agentTools = [];
 let chatLoaded = false;
 
 // --- Chat input draft persistence (localStorage) ---
 (function() {
-    const DRAFT_KEY = 'chat_draft_' + AGENT_ID;
+    // Computed per call so drafts stay per-agent across soft switches
+    function draftKey() { return 'chat_draft_' + AGENT_ID; }
 
     function saveDraft() {
         const input = document.getElementById('chat-input');
         if (!input) return;
         const val = input.value;
         if (val.trim()) {
-            try { localStorage.setItem(DRAFT_KEY, val); } catch(e) { /* quota exceeded, ignore */ }
+            try { localStorage.setItem(draftKey(), val); } catch(e) { /* quota exceeded, ignore */ }
         } else {
-            try { localStorage.removeItem(DRAFT_KEY); } catch(e) {}
+            try { localStorage.removeItem(draftKey()); } catch(e) {}
         }
     }
 
@@ -1233,7 +1263,7 @@ let chatLoaded = false;
         const input = document.getElementById('chat-input');
         if (!input) return;
         try {
-            const saved = localStorage.getItem(DRAFT_KEY);
+            const saved = localStorage.getItem(draftKey());
             if (saved && saved.trim()) {
                 input.value = saved;
                 // Trigger height auto-resize
@@ -1245,11 +1275,14 @@ let chatLoaded = false;
     }
 
     function clearDraft() {
-        try { localStorage.removeItem(DRAFT_KEY); } catch(e) {}
+        try { localStorage.removeItem(draftKey()); } catch(e) {}
     }
 
     // Expose clearDraft so sendChat() can call it
     window._clearChatDraft = clearDraft;
+    // Exposed for softSwitchAgent(): save old agent's draft / restore new agent's
+    window._saveChatDraft = saveDraft;
+    window._restoreChatDraft = restoreDraft;
 
     // Save on input
     document.addEventListener('DOMContentLoaded', function() {
@@ -1395,6 +1428,17 @@ $(document).on('click', '#compiled-prompt-modal', function (e) {
 });
 
 function showTab(name) {
+    // After a soft switch the Settings tab still holds the previous agent's
+    // server-rendered form — saving it would write stale values into the new
+    // agent. Do one real navigation to re-render it.
+    if (window._softSwitched && name === 'general') {
+        // URL is already /agents/<id>#chat after a soft switch, so changing only
+        // the hash won't reload. Set the hash, then force a real reload so the
+        // server re-renders Settings for the current agent.
+        location.hash = 'general';
+        location.reload();
+        return;
+    }
     $('.tab-content').addClass('hidden');
     $('.tab-btn').removeClass('border-indigo-500 text-indigo-600')
                  .addClass('border-transparent text-gray-500');
@@ -1784,6 +1828,13 @@ async function editFile(filename) {
     document.getElementById('kb-editor-filename').textContent = filename;
     document.getElementById('kb-editor-content').value = data.content;
     document.getElementById('kb-editor-modal').classList.remove('hidden');
+    autoGrowKBTextarea(document.getElementById('kb-editor-content'));
+}
+
+function autoGrowKBTextarea(el) {
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, window.innerHeight * 0.65) + 'px';
+    el.style.overflowY = el.scrollHeight > window.innerHeight * 0.65 ? 'auto' : 'hidden';
 }
 
 function closeEditor() {
@@ -1882,9 +1933,11 @@ function renderToolsList() {
     const orphaned = assignedToolIds.filter(id => !knownIds.has(id) && !fnNameToTool[id]);
 
     const sortByName = (a, b) => (a.name || a.id).localeCompare(b.name || b.id);
+    const isArtifactTool = (t) => ARTIFACT_TOOL_IDS.includes(t.id);
     const builtins  = allToolsDefs.filter(t => t._builtin).sort(sortByName);
-    const assigned  = allToolsDefs.filter(t => !t._builtin && isToolAssigned(t.id)).sort(sortByName);
-    const available = allToolsDefs.filter(t => !t._builtin && !isToolAssigned(t.id)).sort(sortByName);
+    const assigned  = allToolsDefs.filter(t => !t._builtin && !isArtifactTool(t) && isToolAssigned(t.id)).sort(sortByName);
+    const available = allToolsDefs.filter(t => !t._builtin && !isArtifactTool(t) && !isToolAssigned(t.id)).sort(sortByName);
+    const artifactTools = allToolsDefs.filter(t => isArtifactTool(t)).sort(sortByName);
 
     let html = '';
 
@@ -1949,6 +2002,42 @@ function renderToolsList() {
     };
 
     html += [...builtins, ...assigned, ...available].map(renderRow).join('');
+
+    // Artifact tools — locked, managed by the Artifacts feature toggle in agent settings
+    if (artifactTools.length > 0) {
+        const lockLabel = ARTIFACTS_ENABLED ? 'Artifacts feature is ON — managed by Settings' : 'Artifacts feature is OFF — managed by Settings';
+        html += artifactTools.map(t => {
+            const safeId = escapeHtml(t.id);
+            const isChecked = ARTIFACTS_ENABLED;
+            return `
+        <div class="tool-row flex items-center justify-between p-3 bg-gray-50 border border-gray-200 rounded-md cursor-pointer dark:bg-gray-800 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"
+             data-assigned="false"
+             data-builtin="false"
+             data-locked="true"
+             data-tool-id="${safeId}"
+             onclick="showToolDetail('${safeId}')">
+            <div class="min-w-0 flex-1 overflow-hidden">
+                <div class="flex flex-wrap items-center gap-1.5">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4 text-gray-400 flex-shrink-0">
+                        <path fill-rule="evenodd" d="M10 1a4.5 4.5 0 00-4.5 4.5V9H5a2 2 0 00-2 2v6a2 2 0 002 2h10a2 2 0 002-2v-6a2 2 0 00-2-2h-.5V5.5A4.5 4.5 0 0010 1zm3 8V5.5a3 3 0 10-6 0V9h6z" clip-rule="evenodd"/>
+                    </svg>
+                    <span class="text-sm font-medium text-gray-800 dark:text-gray-200">${escapeHtml(t.name || t.id)}</span>
+                    <span class="text-xs bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded">locked</span>
+                    ${t._skill_id ? `<span class="text-xs bg-indigo-50 text-indigo-500 px-1.5 py-0.5 rounded">${escapeHtml(t._skill_id)}</span>` : ''}
+                </div>
+                <p class="text-xs text-gray-400 font-mono mt-0.5">${safeId}</p>
+                <p class="text-xs text-gray-500 mt-0.5">${escapeHtml(t.description || '')}</p>
+            </div>
+            <label class="relative flex-shrink-0 ml-3 cursor-not-allowed"
+                   onclick="event.stopPropagation()"
+                   title="${lockLabel}">
+                <input type="checkbox" ${isChecked ? 'checked' : ''} disabled
+                       class="sr-only peer">
+                <span class="dyn-toggle opacity-60"></span>
+            </label>
+        </div>`;
+        }).join('');
+    }
     list.innerHTML = html;
     filterToolsList();
     updateToolsBadge(assigned.length);
@@ -1972,10 +2061,14 @@ function filterToolsList() {
     rows.forEach(row => {
         const isBuiltin = row.dataset.builtin === 'true';
         const isAssignedRow = row.dataset.assigned === 'true';
+        const isLocked = row.dataset.locked === 'true';
         const toolId = row.dataset.toolId;
 
         let show = true;
-        if (mode === 'assigned') {
+        if (isLocked) {
+            // Locked tools (artifact) are always visible regardless of mode
+            show = true;
+        } else if (mode === 'assigned') {
             show = isBuiltin || isAssignedRow || toolId === ''; // '' = orphan banner
         } else if (mode === 'available') {
             show = !isBuiltin && !isAssignedRow && toolId !== '';
@@ -2015,9 +2108,15 @@ function setFilterMode(mode) {
 }
 
 async function toggleTool(toolId) {
+    // Artifact tools are managed exclusively by the Artifacts toggle in agent settings
+    if (ARTIFACT_TOOL_IDS.includes(toolId)) {
+        showToast('Artifact tools are managed by the Artifacts toggle in agent settings (Advanced tab).', 'info');
+        return;
+    }
     const tool = allToolsDefs.find(t => t.id === toolId);
     const fnName = tool ? ((tool.function || {}).name || tool.name || tool.id) : toolId;
-    if (isToolAssigned(toolId)) {
+    const wasAssigned = isToolAssigned(toolId);
+    if (wasAssigned) {
         // Remove by exact ID and bare function name (backward compat)
         assignedToolIds = assignedToolIds.filter(id => id !== toolId && id !== fnName);
     } else {
@@ -2031,24 +2130,43 @@ async function toggleTool(toolId) {
         assignedToolIds.push(toolId);
     }
     renderToolsList();
-    await saveToolsQuiet();
+    const ok = await saveToolsQuiet();
+    if (ok) {
+        const toolName = tool ? (tool.name || tool.id) : toolId;
+        showToast(`Tool '${toolName}' ${wasAssigned ? 'disabled' : 'enabled'}`, 'success');
+    }
 }
 
 async function removeOrphan(toolId) {
     assignedToolIds = assignedToolIds.filter(id => id !== toolId);
     renderToolsList();
-    await saveToolsQuiet();
+    const ok = await saveToolsQuiet();
+    if (ok) {
+        showToast(`Orphan tool '${toolId}' removed`, 'success');
+    }
 }
 
 async function saveToolsQuiet() {
-    await fetch(`/api/agents/${AGENT_ID}/tools`, {
-        method: 'PUT',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({tools: assignedToolIds})
-    });
-    const st = document.getElementById('tools-save-status');
-    st.classList.remove('hidden');
-    setTimeout(() => st.classList.add('hidden'), 1500);
+    try {
+        const res = await fetch(`/api/agents/${AGENT_ID}/tools`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({tools: assignedToolIds})
+        });
+        if (!res.ok) {
+            showToast('Failed to save tools', 'error');
+            return false;
+        }
+        const data = await res.json();
+        if (data.error) {
+            showToast(data.error, 'error');
+            return false;
+        }
+        return true;
+    } catch(e) {
+        showToast('Network error saving tools', 'error');
+        return false;
+    }
 }
 
 // ==================== Skills Tab ====================
@@ -2104,7 +2222,7 @@ async function toggleSkill(skillId) {
         // Activating — check if non-lazy skill needs confirmation
         const skill = allSkillsDefs.find(s => s.id === skillId);
         if (skill && skill.lazy_tools !== true) {
-            if (!confirm('This skill is eagerly loaded (non-lazy). Activating it will automatically add all its tools to the agent. If you want to pick specific tools instead, use the Tools tab.')) {
+            if (!await showConfirm({title: 'Activate Skill', message: 'This skill is eagerly loaded (non-lazy). Activating it will automatically add all its tools to the agent. If you want to pick specific tools instead, use the Tools tab.', confirmText: 'Activate'})) {
                 // User cancelled — revert the checkbox visually
                 renderSkillsList();
                 return;
@@ -2816,9 +2934,11 @@ let _chatSessionId = null;  // cached session_id for this user
 
 async function _getChatSessionId() {
     if (_chatSessionId) return _chatSessionId;
+    const epoch = window._agentEpoch;
     try {
         const res = await fetch(`/api/agents/${AGENT_ID}/chat/session?user_id=web_test`);
         const data = await res.json();
+        if (epoch !== window._agentEpoch) return null; // agent switched mid-fetch — don't cache
         _chatSessionId = data.session_id || null;
     } catch(e) { /* ignore */ }
     return _chatSessionId;
@@ -2905,6 +3025,7 @@ function _showChatLoadingSkeleton() {
 }
 
 async function loadChatHistory() {
+    const epoch = window._agentEpoch;
     _pollThinkingId = null;
     lastChatTs = 0;
     _showChatLoadingSkeleton();
@@ -2914,9 +3035,12 @@ async function loadChatHistory() {
         const res = await fetch(`/api/agents/${AGENT_ID}/chat?user_id=web_test&limit=50`);
         await sidPromise; // ensure cache is primed before restoreActiveReasoning runs
         const data = await res.json();
+        if (epoch !== window._agentEpoch) return; // agent switched mid-fetch — discard
         chatUI.clearContainer();
         chatUI.batchRender(() => renderEntries(data.entries || []));
     } catch(e) { /* ignore load errors */ }
+    if (epoch !== window._agentEpoch) return;
+    if (window.finishNavProgress) window.finishNavProgress(); // end soft-switch loading bar (no-op otherwise)
     chatLoaded = true;
     setTimeout(() => chatUI.scrollToBottom(), 50);
     if (!_chatBusy) startIdlePoll();
@@ -2924,6 +3048,7 @@ async function loadChatHistory() {
 }
 
 async function restoreActiveReasoning() {
+    const epoch = window._agentEpoch;
     try {
         // Use cached session_id — already fetched in loadChatHistory()
         const sessionId = await _getChatSessionId();
@@ -2933,6 +3058,7 @@ async function restoreActiveReasoning() {
         const eRes = await fetch(`/api/agents/${encodeURIComponent(AGENT_ID)}/chat/events?session_id=${encodeURIComponent(sessionId)}&after=0`);
         if (!eRes.ok || _chatBusy || _currentTurn) return; // bail if user sent a message while fetching
         const eData = await eRes.json();
+        if (epoch !== window._agentEpoch) return; // agent switched mid-fetch — discard
         if (_chatBusy || _currentTurn) return; // bail before touching shared state
         const events = eData.events || [];
         if (!events.length) return;
@@ -2943,7 +3069,8 @@ async function restoreActiveReasoning() {
         // replayed again — which would create a duplicate thinking bubble for turn 1.
         const lastDoneIdx = events.reduce((idx, ev, i) => ev.event === 'done' ? i : idx, -1);
         const lastSplitIdx = events.reduce((idx, ev, i) => ev.event === 'turn_split' ? i : idx, -1);
-        const cutIdx = Math.max(lastDoneIdx, lastSplitIdx);
+        const lastClearIdx = events.reduce((idx, ev, i) => ev.event === 'session_clear' ? i : idx, -1);
+        const cutIdx = Math.max(lastDoneIdx, lastSplitIdx, lastClearIdx);
         const replayEvents = cutIdx >= 0 ? events.slice(cutIdx + 1) : events;
         if (!replayEvents.length) return;
 
@@ -3077,7 +3204,7 @@ function setChatBusy(busy) {
 
 // Background poll for busy state set by external sessions (notifier, other channels)
 let _busyPolling = false;
-setInterval(async () => {
+let _busyPollTimer = setInterval(async () => {
     if (_chatBusy || _busyPolling) return; // skip if already busy or previous request still in-flight
     _busyPolling = true;
     try {
@@ -3086,6 +3213,12 @@ setInterval(async () => {
         updateBusyBadge(data.busy);
     } catch (e) { /* ignore */ } finally { _busyPolling = false; }
 }, 5000);
+
+// Stop all polling on page unload to free HTTP connections during navigation
+window.addEventListener('beforeunload', () => {
+    if (_busyPollTimer) { clearInterval(_busyPollTimer); _busyPollTimer = null; }
+    stopIdlePoll();
+});
 
 function startIdlePoll() {
     if (chatIdleTimer) return; // already running
@@ -3647,7 +3780,8 @@ function closeMobileChatSummary() {
     document.getElementById('mobile-chat-summary-overlay').classList.add('hidden');
 }
 
-async function refreshSessionState() {
+let _refreshSessionStateTimer = null;
+const _refreshSessionStateImpl = async function() {
     try {
         // Fetch both session summary and agent state in parallel
         const sid = _chatSessionId ? `&session_id=${encodeURIComponent(_chatSessionId)}` : '';
@@ -3717,6 +3851,12 @@ async function refreshSessionState() {
             mobileMeta.classList.add('hidden');
         }
     } catch(e) { /* ignore */ }
+};
+
+// Debounced wrapper — coalesces rapid calls into one (300ms delay)
+function refreshSessionState() {
+    if (_refreshSessionStateTimer) clearTimeout(_refreshSessionStateTimer);
+    _refreshSessionStateTimer = setTimeout(() => { _refreshSessionStateTimer = null; _refreshSessionStateImpl(); }, 300);
 }
 
 async function refreshAgentState() {
@@ -3794,19 +3934,26 @@ function updateWorkspaceVisibility() {
 
 function updateChatPanelTitle(connectionStatus) {
     const sel = document.getElementById('agent-workplace-id');
-    const icon = document.getElementById('homePulseIcon');
-    if (!icon) return;
+    const badge = document.getElementById('homeWorkplaceBadge');
+    if (!badge) return;
     const selectedOpt = sel ? sel.options[sel.selectedIndex] : null;
     const homeType = selectedOpt ? selectedOpt.dataset.type : '';
-    const isDisconnected = connectionStatus && connectionStatus !== 'connected';
+    const isDisconnected = connectionStatus !== 'connected';
     if (homeType === 'remote') {
-        icon.classList.remove('hidden');
-        icon.className = 'inline-block w-2.5 h-2.5 rounded-full animate-pulse flex-shrink-0 ' + (isDisconnected ? 'bg-red-500' : 'bg-green-500');
+        badge.classList.remove('hidden');
+        badge.textContent = 'SSH';
+        badge.className = 'inline-flex items-center text-[10px] font-semibold px-1.5 py-0.5 rounded border flex-shrink-0 ' + (isDisconnected
+            ? 'bg-gray-100 text-gray-500 border-green-300 dark:bg-gray-700 dark:text-gray-400 dark:border-green-700'
+            : 'bg-green-100 text-green-700 border-green-300 dark:bg-green-900/20 dark:text-green-400 dark:border-green-700');
     } else if (homeType === 'tunnel') {
-        icon.classList.remove('hidden');
-        icon.className = 'inline-block w-2.5 h-2.5 rounded-full animate-pulse flex-shrink-0 ' + (isDisconnected ? 'bg-red-500' : 'bg-blue-500');
+        badge.classList.remove('hidden');
+        badge.textContent = 'Evonet';
+        badge.className = 'inline-flex items-center text-[10px] font-semibold px-1.5 py-0.5 rounded border flex-shrink-0 ' + (isDisconnected
+            ? 'bg-gray-100 text-gray-500 border-blue-300 dark:bg-gray-700 dark:text-gray-400 dark:border-blue-700'
+            : 'bg-blue-100 text-blue-700 border-blue-300 dark:bg-blue-900/20 dark:text-blue-400 dark:border-blue-700');
     } else {
-        icon.classList.add('hidden');
+        badge.textContent = '';
+        badge.className = 'hidden';
     }
 }
 
@@ -3947,14 +4094,22 @@ document.addEventListener('keydown', function(e) {
 // ==================== Artifacts Tab ====================
 let _artifactsData = [];
 let _artifactsFilterType = 'all';
+let _artifactsPage = 1;
+let _artifactsPages = 1;
+let _artifactsTotal = 0;
 
 async function loadArtifacts() {
     const sort = document.getElementById('artifacts-sort').value;
+    const q = document.getElementById('artifacts-search').value.trim();
+    const type = _artifactsFilterType;
     try {
-        const res = await fetch(`/api/agents/${AGENT_ID}/artifacts?sort=${sort}`);
+        const res = await fetch(`/api/agents/${AGENT_ID}/artifacts?sort=${sort}&page=${_artifactsPage}&limit=24&q=${encodeURIComponent(q)}&type=${encodeURIComponent(type)}`);
         const data = await res.json();
         _artifactsData = data.files || [];
+        _artifactsPages = data.pages || 1;
+        _artifactsTotal = data.total || 0;
         renderArtifacts();
+        renderArtifactPagination();
     } catch(e) {
         console.error('Failed to load artifacts:', e);
     }
@@ -3964,17 +4119,8 @@ function renderArtifacts() {
     const grid = document.getElementById('artifacts-grid');
     const empty = document.getElementById('artifacts-empty');
     
-    // Apply search filter
-    const query = (document.getElementById('artifacts-search').value || '').trim().toLowerCase();
-    let filtered = _artifactsData;
-    if (query) {
-        filtered = filtered.filter(f => f.filename.toLowerCase().includes(query));
-    }
-    
-    // Apply type filter
-    if (_artifactsFilterType !== 'all') {
-        filtered = filtered.filter(f => f.category === _artifactsFilterType);
-    }
+    // Server already applies search and type filtering; just render what we have
+    const filtered = _artifactsData;
     
     if (filtered.length === 0) {
         grid.innerHTML = '';
@@ -4031,8 +4177,12 @@ function getArtifactIcon(category) {
     }
 }
 
+let _artifactsSearchTimer = null;
+
 function filterArtifacts() {
-    renderArtifacts();
+    clearTimeout(_artifactsSearchTimer);
+    _artifactsPage = 1;
+    _artifactsSearchTimer = setTimeout(() => loadArtifacts(), 250);
 }
 
 function setArtifactFilter(type) {
@@ -4046,7 +4196,59 @@ function setArtifactFilter(type) {
             chip.classList.add('border-gray-300', 'text-gray-600', 'hover:bg-gray-50', 'dark:border-gray-600', 'dark:text-gray-400', 'dark:hover:bg-gray-700');
         }
     });
-    renderArtifacts();
+    _artifactsPage = 1;
+    loadArtifacts();
+}
+
+function renderArtifactPagination() {
+    const pagination = document.getElementById('artifacts-pagination');
+    const prevBtn = document.getElementById('artifacts-prev-btn');
+    const nextBtn = document.getElementById('artifacts-next-btn');
+    const info = document.getElementById('artifacts-pagination-info');
+    const pageButtons = document.getElementById('artifacts-page-buttons');
+
+    if (_artifactsPages <= 1) {
+        pagination.classList.add('hidden');
+        return;
+    }
+    pagination.classList.remove('hidden');
+
+    // Info text
+    info.textContent = `Showing page ${_artifactsPage} of ${_artifactsPages} (${_artifactsTotal} artifacts)`;
+
+    // Previous/Next buttons
+    prevBtn.disabled = _artifactsPage <= 1;
+    nextBtn.disabled = _artifactsPage >= _artifactsPages;
+
+    // Page number buttons
+    let pageHtml = '';
+    const maxButtons = 5;
+    let startPage = Math.max(1, _artifactsPage - Math.floor(maxButtons / 2));
+    let endPage = Math.min(_artifactsPages, startPage + maxButtons - 1);
+    if (endPage - startPage < maxButtons - 1) {
+        startPage = Math.max(1, endPage - maxButtons + 1);
+    }
+
+    for (let p = startPage; p <= endPage; p++) {
+        const active = p === _artifactsPage
+            ? 'bg-indigo-600 text-white border-indigo-600'
+            : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-600';
+        pageHtml += `<button onclick="goArtifactPage(${p})" class="w-8 h-8 text-sm font-medium rounded-md border ${active} transition-colors">${p}</button>`;
+    }
+    pageButtons.innerHTML = pageHtml;
+}
+
+function goArtifactPage(target) {
+    if (target === 'prev') {
+        if (_artifactsPage <= 1) return;
+        _artifactsPage--;
+    } else if (target === 'next') {
+        if (_artifactsPage >= _artifactsPages) return;
+        _artifactsPage++;
+    } else {
+        _artifactsPage = target;
+    }
+    loadArtifacts();
 }
 
 function downloadArtifact(filename) {
@@ -4054,6 +4256,16 @@ function downloadArtifact(filename) {
 }
 
 function openArtifact(filename, category) {
+    // Image branch: use Lightbox for prev/next navigation among image artifacts only
+    if (category === 'image') {
+        const imageArtifacts = _artifactsData.filter(f => f.category === 'image');
+        if (!imageArtifacts.length) return;
+        const imageUrls = imageArtifacts.map(f => `/api/agents/${AGENT_ID}/artifacts/${f.filename}`);
+        const idx = imageArtifacts.findIndex(f => f.filename === filename);
+        Lightbox.open(imageUrls, Math.max(0, idx));
+        return;
+    }
+
     const existing = document.getElementById('artifact-viewer-modal');
     if (existing) existing.remove();
 
@@ -4328,7 +4540,8 @@ async function toggleEnabled() {
         body: JSON.stringify({enabled: newEnabled})
     });
     const data = await res.json();
-    if (data.error) { alert(data.error); return; }
+    if (data.error) { toast.error('Failed to ' + action + ' agent: ' + data.error); return; }
+    toast.success('Agent ' + action + 'd successfully');
     _agentEnabled = newEnabled;
     const btn = document.getElementById('toggle-enabled-btn');
     if (btn) {
@@ -4608,21 +4821,140 @@ async function loadPortalWorkplaces() {
 
 <!-- ==================== Chat UI v2 init ==================== -->
 <script>
-$(function () {
-    window.chatUI = new window.ChatUI($('#chat-messages'), {
+// Builds against the current AGENT_ID — also used by softSwitchAgent()
+function _createChatUI() {
+    return new window.ChatUI($('#chat-messages'), {
         perspective: 'A',
         showTimestamps: false,
         userBubbleClass: 'bg-indigo-500 text-white dark:bg-indigo-800',
         assistantBubbleClass: 'bg-gray-200 text-gray-800 dark:bg-[#152A3A] border dark:border-[#1B394F] dark:text-gray-100',
-        agentAvatarUrl: '/api/agents/{{ agent.id }}/avatar',
-        agentId: '{{ agent.id }}',
+        agentAvatarUrl: '/api/agents/' + encodeURIComponent(AGENT_ID) + '/avatar',
+        agentId: AGENT_ID,
     });
+}
+
+$(function () {
+    window.chatUI = _createChatUI();
     showTab(window._tabInitHash || 'chat');
     try {
         if (localStorage.getItem('evonic-chat-fullscreen') === '1') {
             toggleChatFullscreenMode();
         }
     } catch(_) {}
+});
+</script>
+
+<!-- ==================== Soft agent switch ==================== -->
+<script>
+// Retarget this page to another agent without a full page load. Returns false
+// when the caller must fall back to a real navigation (structural mismatch,
+// fetch failure). Every tab except Settings re-fetches its data keyed on
+// AGENT_ID, so swapping identity + resetting chat state is sufficient;
+// Settings is server-rendered and triggers a real navigation via showTab().
+window.softSwitchAgent = async function (newId, opts = {}) {
+    if (newId === AGENT_ID) { showTab('chat'); return true; }
+
+    // Show the top-loading bar for the whole switch; finished once the new
+    // agent's chat history renders (end of loadChatHistory). On a fallback to
+    // full navigation the page reload clears the bar.
+    if (window.startNavProgress) window.startNavProgress();
+
+    let data;
+    try {
+        const res = await fetch('/api/agents/' + encodeURIComponent(newId));
+        if (!res.ok) return false;
+        data = await res.json();
+    } catch (e) { return false; }
+
+    // Structural guard: the artifacts tab and agent-state panels are
+    // conditionally server-rendered and NOT toggled here — fall back to a full
+    // nav when they differ. (is_super differences ARE handled below: the ID
+    // badge / gear menu / Skills tab are always rendered and toggled.)
+    const hasArtifactsTab = !!document.querySelector('[data-tab="artifacts"]');
+    if (!!data.artifacts_enabled !== hasArtifactsTab) return false;
+    if (!!data.enable_agent_state !== ENABLE_AGENT_STATE) return false;
+
+    // --- Teardown the current agent ---
+    window._agentEpoch++; // invalidates in-flight chat/session fetches
+    if (window._saveChatDraft) window._saveChatDraft(); // persists under the OLD agent's key
+    _destroyCurrentTurn();
+    stopIdlePoll();
+    updateBusyBadge(false); // _busyPollTimer refreshes for the new agent within 5s
+    const gearDd = document.getElementById('gear-dropdown');
+    if (gearDd) gearDd.classList.add('hidden');
+    if (_qrPollInterval) closeQRModal();
+    if (_cdPollInterval) closeChannelDetail();
+
+    // --- Swap identity + reset per-agent state ---
+    AGENT_ID = newId;
+    _chatSessionId = null;
+    chatLoaded = false;
+    lastChatTs = 0;
+    lastTurnEndTs = 0;
+    _chatBusy = false;
+    _pollThinkingId = null;
+    _planEditorFetchedFor = null;
+    _planEditorOriginal = null;
+    window.chatUI = _createChatUI();
+
+    // --- Update server-rendered header bits ---
+    const nameEl = document.getElementById('agent-header-name');
+    if (nameEl) nameEl.textContent = data.name || newId;
+    // Toggle super-only structural elements (always present in the DOM now)
+    const isSuper = !!data.is_super;
+    ['#agent-header-id-badge', '#gear-dropdown-wrap', '[data-tab="skills"]'].forEach(function (sel) {
+        const el = document.querySelector(sel);
+        if (el) el.classList.toggle('hidden', isSuper); // shown for regular, hidden for super
+    });
+    const idBadge = document.getElementById('agent-header-id-badge');
+    if (idBadge) idBadge.textContent = newId;
+    const chatName = document.getElementById('chat-panel-agent-name');
+    if (chatName) chatName.textContent = data.name || newId;
+    const avatarImg = document.getElementById('agent-avatar-header');
+    if (avatarImg) {
+        avatarImg.style.display = ''; // undo a previous onerror hide
+        avatarImg.src = '/api/agents/' + encodeURIComponent(newId) + '/avatar';
+    }
+    const toggleLabel = document.querySelector('#toggle-enabled-btn span');
+    if (toggleLabel) toggleLabel.textContent = data.enabled != 0 ? 'Disable' : 'Enable';
+    // The API can't recompute workspace validity — hide the banner; it
+    // reappears correctly on any full page load.
+    const wsBanner = document.getElementById('workspace-invalid-banner');
+    if (wsBanner) wsBanner.classList.add('hidden');
+
+    // Workplace select drives the chat connection overlay/status badge
+    const wpSel = document.getElementById('agent-workplace-id');
+    if (wpSel) {
+        wpSel.value = data.workplace_id || '';
+        updateWorkspaceVisibility();
+        pollWorkplaceStatus();
+        updateChatPanelTitle();
+    }
+
+    // Fresh chat input: clear the old agent's text, restore the new one's draft
+    const input = document.getElementById('chat-input');
+    if (input) { input.value = ''; input.style.height = 'auto'; }
+    if (window._restoreChatDraft) window._restoreChatDraft();
+    if (typeof dismissBubble === 'function') dismissBubble(newId);
+
+    // From popstate the browser already moved in history — pushing again would
+    // truncate the forward stack and duplicate entries.
+    if (!opts.fromHistory) {
+        history.pushState({agentId: newId}, '', '/agents/' + encodeURIComponent(newId) + '#chat');
+    }
+    window._softSwitched = true;
+    showTab('chat'); // chatLoaded=false → loads new agent's history/session/state
+    return true;
+};
+
+window.addEventListener('popstate', function () {
+    const m = location.pathname.match(/^\/agents\/([^\/]+)\/?$/);
+    if (!m) return;
+    const id = decodeURIComponent(m[1]);
+    if (id !== AGENT_ID) {
+        window.softSwitchAgent(id, {fromHistory: true}).then(function (ok) { if (!ok) location.reload(); });
+    }
+    // Hash-only history entries (tab switches) keep today's behavior: no-op here.
 });
 </script>
 

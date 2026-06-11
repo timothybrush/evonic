@@ -50,21 +50,50 @@ class AgentChatDB:
             agent_dir = os.path.join(AGENTS_DIR, agent_id)
         os.makedirs(agent_dir, exist_ok=True)
         self.db_path = os.path.join(agent_dir, 'chat.db')
+        self._conn = None
+        self._lock = threading.Lock()
         self._init_tables()
+
+    def _get_conn(self) -> sqlite3.Connection:
+        """Return the single persistent connection, creating it if needed."""
+        if self._conn is not None:
+            try:
+                self._conn.execute("SELECT 1")
+                return self._conn
+            except Exception:
+                self._conn = None
+        conn = sqlite3.connect(f"file:{self.db_path}?mode=rwc&busy_timeout=10000", uri=True)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA wal_autocheckpoint=1000")
+        conn.execute("PRAGMA cache_size=-8000")
+        conn.execute("PRAGMA mmap_size=268435456")
+        self._conn = conn
+        return conn
 
     @contextmanager
     def _connect(self) -> Generator[sqlite3.Connection, None, None]:
-        """Context manager that returns a SQLite connection for this agent's database.
-        The connection is opened on entry and closed on exit to prevent file descriptor leaks.
-        Includes automatic transaction management (commit/rollback).
+        """Context manager returning a shared persistent connection.
+
+        One connection per AgentChatDB instance (not per-thread) keeps FD
+        count bounded to ~42 (one per agent) while avoiding the PRAGMA
+        overhead and WAL checkpoint-on-last-close penalty of open/close
+        per request.
         """
-        conn = sqlite3.connect(f"file:{self.db_path}?mode=rwc&busy_timeout=10000", uri=True)
-        conn.execute("PRAGMA journal_mode=WAL")
-        try:
+        with self._lock:
+            conn = self._get_conn()
             with conn:
                 yield conn
-        finally:
-            conn.close()
+
+    def close(self):
+        """Explicitly close the persistent connection."""
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
 
     def _init_tables(self):
         with self._connect() as conn:
@@ -201,6 +230,27 @@ class AgentChatDB:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_dimension ON memories(dimension)")
             conn.commit()
 
+    def get_session_id(self, agent_id: str, external_user_id: str,
+                        channel_id: str = None) -> Optional[str]:
+        """Read-only session lookup. Returns session_id if it exists, else None."""
+        from models.chatlog import session_slug
+        slug = f"{agent_id}-{session_slug(external_user_id, agent_id=agent_id)}"
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            if channel_id:
+                row = conn.execute("""
+                    SELECT id FROM chat_sessions
+                    WHERE agent_id = ? AND channel_id = ? AND external_user_id = ?
+                    AND (archived IS NULL OR archived = 0)
+                """, (agent_id, channel_id, external_user_id)).fetchone()
+            else:
+                row = conn.execute("""
+                    SELECT id FROM chat_sessions
+                    WHERE agent_id = ? AND channel_id IS NULL AND external_user_id = ?
+                    AND (archived IS NULL OR archived = 0)
+                """, (agent_id, external_user_id)).fetchone()
+            return row['id'] if row else None
+
     def get_or_create_session(self, agent_id: str, external_user_id: str,
                                channel_id: str = None,
                                channel_type: str = None) -> str:
@@ -228,10 +278,6 @@ class AgentChatDB:
                     _migrate_session_id(cursor, old_id, slug)
                     conn.commit()
                     return slug
-                cursor.execute(
-                    "UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (row['id'],))
-                conn.commit()
                 return row['id']
             # No active session found — check for archived session to reuse
             if channel_id:
@@ -905,6 +951,15 @@ class AgentChatDB:
                 (dimension,))
             return [dict(r) for r in cursor.fetchall()]
 
+    def get_null_dimension_memories(self) -> List[Dict[str, Any]]:
+        """Get all active, non-superseded memories that have no dimension assigned."""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM memories WHERE dimension IS NULL AND expired = 0 AND superseded_by IS NULL ORDER BY updated_at DESC")
+            return [dict(r) for r in cursor.fetchall()]
+
     def supersede_memory(self, old_memory_id: int, new_memory_id: int):
         """Mark old_memory_id as superseded by new_memory_id."""
         with self._connect() as conn:
@@ -920,6 +975,13 @@ class AgentChatDB:
                 "UPDATE memories SET expired=1, updated_at=CURRENT_TIMESTAMP WHERE id=?",
                 (memory_id,))
             conn.commit()
+
+    def clear_all_memories(self) -> int:
+        """Delete all memories. Returns the number of rows deleted."""
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM memories")
+            conn.commit()
+            return cursor.rowcount
 
 
 class AgentChatManager:

@@ -48,21 +48,50 @@ class Database(
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         _migrate_db_to_subdir(db_path)
+        self._tls = threading.local()
         self._init_tables()
+        # Keep one read-only connection alive for the process lifetime.
+        # This prevents SQLite from running a WAL checkpoint every time the
+        # last per-request connection closes, which causes random stalls.
+        self._anchor = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        self._anchor.execute("PRAGMA journal_mode=WAL")
 
     @contextmanager
     def _connect(self) -> Generator[sqlite3.Connection, None, None]:
-        """Context manager that returns a SQLite connection with WAL mode and busy timeout.
-        The connection is opened on entry and closed on exit to prevent file descriptor leaks.
-        Includes automatic transaction management (commit/rollback).
+        """Thread-local persistent connection.
+
+        Each thread gets its own connection (PRAGMAs set once).
+        SSE endpoint handlers MUST call db.close() before entering their
+        generator loop so the long-lived thread doesn't leak a file descriptor.
         """
-        conn = sqlite3.connect(f"file:{self.db_path}?mode=rwc&busy_timeout=10000", uri=True)
-        conn.execute("PRAGMA journal_mode=WAL")
-        try:
-            with conn:
-                yield conn
-        finally:
-            conn.close()
+        conn = getattr(self._tls, 'conn', None)
+        if conn is not None:
+            try:
+                conn.execute("SELECT 1")
+            except Exception:
+                conn = None
+
+        if conn is None:
+            conn = sqlite3.connect(f"file:{self.db_path}?mode=rwc&busy_timeout=10000", uri=True)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA wal_autocheckpoint=1000")
+            conn.execute("PRAGMA cache_size=-8000")
+            conn.execute("PRAGMA mmap_size=268435456")
+            self._tls.conn = conn
+
+        with conn:
+            yield conn
+
+    def close(self):
+        """Close the thread-local connection (call from SSE handlers)."""
+        conn = getattr(self._tls, 'conn', None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._tls.conn = None
 
 
 # Re-export chat classes for backward compatibility

@@ -72,6 +72,17 @@ WORKSPACE_DIR = os.path.join(BASE_DIR, 'shared', 'agents')
 SLUG_RE = re.compile(r'^[a-z0-9_]+$')
 USER_ID_RE = re.compile(r'^[a-zA-Z0-9_\-\.@]{1,128}$')
 
+# Tools managed exclusively by the artifacts_enabled agent setting.
+# These cannot be toggled manually in the Tools tab — they are read-only.
+ARTIFACT_TOOLS = frozenset({
+    'save_artifact',
+    'list_artifacts',
+    'read_attachment',
+    'cleanup_attachments',
+    'portal_copy',
+    'copy_status',
+})
+
 
 def _validate_user_id(user_id: str) -> str:
     """Validate and normalize a user_id parameter.
@@ -241,10 +252,11 @@ def api_create_agent():
         _write_system_prompt(agent_id, data.get('system_prompt', ''))
         # Create artifacts directory
         _artifacts_dir(agent_id)
-        # Add save_artifact tool for agents with artifacts enabled
+        # Add artifact tools for agents with artifacts enabled
         artifacts_enabled = data.get('artifacts_enabled')
         if artifacts_enabled is None or artifacts_enabled:
-            db.add_agent_tool(agent_id, 'save_artifact')
+            for tool_id in ARTIFACT_TOOLS:
+                db.add_agent_tool(agent_id, tool_id)
         # Create notes.md template if it does not already exist
         _notes_md = os.path.join(_kb_dir(agent_id), 'notes.md')
         if not os.path.isfile(_notes_md):
@@ -270,15 +282,17 @@ def api_update_agent(agent_id):
     _apply_sandbox_workplace_policy(data, target_workplace_id)
     if 'system_prompt' in data:
         _write_system_prompt(agent_id, data['system_prompt'])
-    # Handle artifacts_enabled toggle: manage save_artifact tool
+    # Handle artifacts_enabled toggle: manage all artifact tools
     if 'artifacts_enabled' in data:
         old_artifacts = existing.get('artifacts_enabled', True) if existing.get('artifacts_enabled') is not None else True
         new_artifacts = bool(data['artifacts_enabled'])
         if new_artifacts != old_artifacts:
             if new_artifacts:
-                db.add_agent_tool(agent_id, 'save_artifact')
+                for tool_id in ARTIFACT_TOOLS:
+                    db.add_agent_tool(agent_id, tool_id)
             else:
-                db.remove_agent_tool(agent_id, 'save_artifact')
+                for tool_id in ARTIFACT_TOOLS:
+                    db.remove_agent_tool(agent_id, tool_id)
     db.update_agent(agent_id, data)
     agent = db.get_agent(agent_id)
     agent['system_prompt'] = _read_system_prompt(agent_id, fallback=agent.get('system_prompt', ''))
@@ -368,6 +382,19 @@ def api_get_agent_tools(agent_id):
 def api_set_agent_tools(agent_id):
     data = request.get_json()
     tool_ids = data.get('tools', [])
+    # Enforce artifacts_enabled lock: artifact tools are managed exclusively
+    # by the agent's artifacts_enabled setting, not via manual toggle.
+    agent = db.get_agent(agent_id)
+    if agent:
+        artifacts_enabled = agent.get('artifacts_enabled', True)
+        if artifacts_enabled:
+            # Ensure all artifact tools are present — silently re-add if omitted
+            for tool_id in ARTIFACT_TOOLS:
+                if tool_id not in tool_ids:
+                    tool_ids.append(tool_id)
+        else:
+            # Ensure no artifact tools are present — silently strip if added
+            tool_ids = [tid for tid in tool_ids if tid not in ARTIFACT_TOOLS]
     db.set_agent_tools(agent_id, tool_ids)
     return jsonify({'success': True, 'tools': tool_ids})
 
@@ -533,6 +560,8 @@ def api_list_artifacts(agent_id):
     sort_param = request.args.get('sort', 'newest')
     query = (request.args.get('q', '') or '').strip().lower()
     type_filter = (request.args.get('type', '') or '').strip().lower()
+    page = request.args.get('page', 1, type=int)
+    limit = request.args.get('limit', 24, type=int)
     
     # File type category detection
     def _get_file_category(fname):
@@ -588,7 +617,19 @@ def api_list_artifacts(agent_id):
     else:  # newest
         files.sort(key=lambda f: f['modified'], reverse=True)
     
-    return jsonify({'files': files})
+    # Pagination
+    total = len(files)
+    pages = max(1, -(-total // limit))  # ceil division
+    start = (page - 1) * limit
+    files = files[start:start + limit]
+    
+    return jsonify({
+        'files': files,
+        'total': total,
+        'page': page,
+        'limit': limit,
+        'pages': pages,
+    })
 
 
 @agents_bp.route('/api/agents/<agent_id>/artifacts/<path:filename>', methods=['GET'])
@@ -654,22 +695,30 @@ def _avatar_dir(agent_id: str) -> str:
     return d
 
 
+def _abs_avatar_path(avatar_path):
+    """Resolve a stored avatar_path (may be relative) to an absolute path."""
+    if avatar_path and not os.path.isabs(avatar_path):
+        return os.path.join(BASE_DIR, avatar_path)
+    return avatar_path
+
+
 @agents_bp.route('/api/agents/<agent_id>/avatar', methods=['GET'])
 def api_get_avatar(agent_id):
     agent = db.get_agent(agent_id)
     if not agent:
         return jsonify({'error': 'Agent not found'}), 404
     avatar_path = agent.get('avatar_path', '')
-    if avatar_path and os.path.isfile(avatar_path):
+    abs_path = _abs_avatar_path(avatar_path)
+    if abs_path and os.path.isfile(abs_path):
         import mimetypes
-        mime, _ = mimetypes.guess_type(avatar_path)
+        mime, _ = mimetypes.guess_type(abs_path)
         if mime is None:
             mime = 'application/octet-stream'
         from flask import send_file
         # Force download for all stored avatar files to prevent any stored SVG
         # from being rendered as an active document in the browser (XSS defence).
-        return send_file(avatar_path, mimetype=mime, as_attachment=True,
-                         download_name=os.path.basename(avatar_path))
+        return send_file(abs_path, mimetype=mime, as_attachment=True,
+                         download_name=os.path.basename(abs_path))
     # Return the default avatar as an inline SVG served from a static string.
     # This SVG is fully controlled server-side and contains no user content.
     default_svg = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none">
@@ -705,16 +754,18 @@ def api_upload_avatar(agent_id):
     avatar_dir = _avatar_dir(agent_id)
     # Remove old avatar file if exists
     old_path = agent.get('avatar_path', '')
-    if old_path and os.path.isfile(old_path):
+    old_abs = _abs_avatar_path(old_path)
+    if old_abs and os.path.isfile(old_abs):
         try:
-            os.remove(old_path)
+            os.remove(old_abs)
         except OSError:
             pass
     # Save new avatar
     fname = f'avatar{ext}'
     fpath = os.path.join(avatar_dir, fname)
     f.save(fpath)
-    db.update_agent(agent_id, {'avatar_path': fpath})
+    rel_path = os.path.join('shared', 'avatars', agent_id, fname)
+    db.update_agent(agent_id, {'avatar_path': rel_path})
     return jsonify({'success': True, 'avatar_path': f'/api/agents/{agent_id}/avatar'})
 
 
@@ -724,9 +775,10 @@ def api_delete_avatar(agent_id):
     if not agent:
         return jsonify({'error': 'Agent not found'}), 404
     old_path = agent.get('avatar_path', '')
-    if old_path and os.path.isfile(old_path):
+    old_abs = _abs_avatar_path(old_path)
+    if old_abs and os.path.isfile(old_abs):
         try:
-            os.remove(old_path)
+            os.remove(old_abs)
         except OSError:
             pass
     db.update_agent(agent_id, {'avatar_path': ''})
@@ -980,7 +1032,7 @@ def api_llm_preview(agent_id):
     if not agent:
         return jsonify({'error': 'Agent not found'}), 404
     user_id = request.args.get('user_id', 'anonymous')
-    session_id = db.get_or_create_session(agent_id, user_id)
+    session_id = db.get_session_id(agent_id, user_id) or db.get_or_create_session(agent_id, user_id)
 
     from backend.agent_runtime import agent_runtime
     from backend.agent_runtime.context import build_system_prompt
@@ -1127,7 +1179,7 @@ def api_chat_jsonl(agent_id):
     limit = min(request.args.get('limit', 30, type=int), 200)
 
     if not session_id:
-        session_id = db.get_or_create_session(agent_id, user_id)
+        session_id = db.get_session_id(agent_id, user_id) or db.get_or_create_session(agent_id, user_id)
 
     chatlog = chatlog_manager.get(agent_id, session_id)
 
@@ -1145,7 +1197,7 @@ def api_chat_jsonl(agent_id):
 @agents_bp.route('/api/agents/<agent_id>/chat/history', methods=['GET'])
 def api_chat_history(agent_id):
     user_id = request.args.get('user_id', 'anonymous')
-    session_id = db.get_or_create_session(agent_id, user_id)
+    session_id = db.get_session_id(agent_id, user_id) or db.get_or_create_session(agent_id, user_id)
     messages = db.get_session_messages(session_id, limit=50, agent_id=agent_id)
     filtered = []
     for m in messages:
@@ -1177,7 +1229,7 @@ def api_chat_poll(agent_id):
     """Poll for new messages after a given message ID."""
     user_id = request.args.get('user_id', 'anonymous')
     after_id = request.args.get('after', 0, type=int)
-    session_id = db.get_or_create_session(agent_id, user_id)
+    session_id = db.get_session_id(agent_id, user_id) or db.get_or_create_session(agent_id, user_id)
     messages = db.get_messages_after(session_id, after_id, agent_id=agent_id)
     filtered = []
     for m in messages:
@@ -1208,7 +1260,7 @@ def api_chat_poll(agent_id):
 @agents_bp.route('/api/agents/<agent_id>/chat/summary', methods=['GET'])
 def api_chat_summary(agent_id):
     user_id = request.args.get('user_id', 'anonymous')
-    session_id = db.get_or_create_session(agent_id, user_id)
+    session_id = db.get_session_id(agent_id, user_id) or db.get_or_create_session(agent_id, user_id)
     summary = db.get_summary(session_id, agent_id=agent_id)
     if summary:
         return jsonify({'summary': summary['summary'],
@@ -1486,18 +1538,26 @@ def api_chat_session(agent_id):
         user_id = _validate_user_id(raw_user_id)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
-    session_id = db.get_or_create_session(agent_id, user_id)
+    session_id = db.get_session_id(agent_id, user_id) or db.get_or_create_session(agent_id, user_id)
     return jsonify({'session_id': session_id})
 
 
 @agents_bp.route('/api/agents/<agent_id>/chat/stream', methods=['GET'])
 def api_chat_stream(agent_id):
-    """SSE endpoint — pushes live thinking/tool events for a session to the browser."""
+    """SSE endpoint — pushes live thinking/tool events for a session to the browser.
+
+    Still the active chat transport: the chat UI bundle has not been migrated to the
+    unified GET /api/realtime/stream?chat=1 (the unified chat path needs its own
+    seq-correctness work first). Kept intentionally; do not remove."""
     session_id = request.args.get('session_id')
     if not session_id:
         return jsonify({'error': 'session_id required'}), 400
 
     from backend.event_stream import event_stream
+
+    # Release the thread-local DB connection acquired by enforce_auth.
+    # This SSE thread will block for 30+s; without close() it leaks an FD.
+    db.close()
 
     q = queue.Queue(maxsize=200)
 
@@ -1510,8 +1570,8 @@ def api_chat_stream(agent_id):
             try:
                 payload = transform(data)
                 if payload is not None:
-                    payload['seq'] = data.get('_seq')
-                    q.put_nowait((sse_event_name, payload, data.get('_seq')))
+                    payload['seq'] = data.get('_chat_seq')
+                    q.put_nowait((sse_event_name, payload, data.get('_chat_seq')))
             except queue.Full:
                 pass
         return handler
@@ -1648,9 +1708,9 @@ def api_chat_stream(agent_id):
         if sse_name_transform:
             sse_name, transform = sse_name_transform
             payload = transform(entry['data'])
-            payload['seq'] = entry['seq']
+            payload['seq'] = entry['chat_seq']
             try:
-                q.put_nowait((sse_name, payload, entry['seq']))
+                q.put_nowait((sse_name, payload, entry['chat_seq']))
             except queue.Full:
                 break
 
@@ -1688,11 +1748,16 @@ def api_chat_stream(agent_id):
 @agents_bp.route('/api/approvals/stream', methods=['GET'])
 def api_approvals_stream():
     """Global SSE endpoint — pushes ALL approval events (any agent, any session)
-    to every connected client. Unlike the per-session chat stream, there is no
-    session_id filtering — this is exactly the point: approval modals need to
-    appear on Dashboard, Settings, Skills, and any other page, not just /agents/:id.
-    """
+    to every connected client.
+    DEPRECATED: Use unified GET /api/realtime/stream?channels=approvals instead."""
+    import logging as _log_depr
+    _log_depr.getLogger(__name__).warning(
+        "DEPRECATED endpoint /api/approvals/stream used — "
+        "migrate to /api/realtime/stream?channels=approvals")
     from backend.event_stream import event_stream
+
+    # Release the thread-local DB connection acquired by enforce_auth.
+    db.close()
 
     q = queue.Queue(maxsize=200)
 
@@ -1785,6 +1850,9 @@ def api_chat_events(agent_id):
         'approval_required': ('approval_required', lambda d: {'approval_id': d.get('approval_id', ''), 'agent_id': d.get('agent_id', ''), 'source_agent_id': d.get('source_agent_id', ''), 'source_agent_name': d.get('source_agent_name', ''), 'tool': d.get('tool_name', ''), 'args': d.get('tool_args', {}), 'approval_info': d.get('approval_info', {}), 'reasons': d.get('reasons', []), 'score': d.get('score')}),
         'approval_resolved': ('approval_resolved', lambda d: {'approval_id': d.get('approval_id', ''), 'decision': d.get('decision', ''), 'timed_out': d.get('timed_out', False)}),
         'llm_retry':         ('retry',             lambda d: {'retry_count': d.get('retry_count', 0), 'max_retries': d.get('max_retries', 0), 'error_type': d.get('error_type', ''), 'message': d.get('user_message', '')}),
+        'message_injected':  ('message_injected',  lambda d: {'message': d.get('message', '')}),
+        'message_injection_applied': ('message_injection_applied', lambda d: {'content': d.get('content', ''), 'count': d.get('count', 1)}),
+        'session_clear':     ('session_clear',     lambda d: {'session_id': d.get('session_id', ''), 'agent_id': d.get('agent_id', '')}),
         'turn_split':        ('turn_split',        lambda d: {}),
     }
 
@@ -1792,14 +1860,28 @@ def api_chat_events(agent_id):
         raw = event_stream.get_session_events(session_id, after_seq)
     else:
         raw = event_stream.get_events_in_range(session_id, after_seq, up_to_seq)
+
+    # Strip boundary events (turn_complete, session_clear) on fresh requests so
+    # restoreActiveReasoning() never replays completed turns or past session_clear
+    # events that would create a stale thinking bubble. Mirror the SSE stream logic
+    # at lines 1668-1674. Only strip when after_seq==0; on gap-fill reconnects
+    # (after_seq>0), the client hasn't seen these events and needs them.
+    if after_seq == 0:
+        last_boundary = -1
+        for i, e in enumerate(raw):
+            if e['event'] in ('turn_complete', 'session_clear'):
+                last_boundary = i
+        if last_boundary >= 0:
+            raw = raw[last_boundary + 1:]
+
     events = []
     for entry in raw:
         event_name = entry['event']
         if event_name in _TRANSFORM_MAP:
             sse_name, transform = _TRANSFORM_MAP[event_name]
             payload = transform(entry['data'])
-            payload['seq'] = entry['seq']
-            events.append({'event': sse_name, 'seq': entry['seq'], 'data': payload})
+            payload['seq'] = entry['chat_seq']
+            events.append({'event': sse_name, 'seq': entry['chat_seq'], 'data': payload})
 
     return jsonify({'events': events})
 
@@ -1852,18 +1934,26 @@ def api_agent_busy(agent_id):
 @agents_bp.route('/api/agents/status/stream', methods=['GET'])
 def api_agents_status_stream():
     """SSE endpoint — pushes real-time agent busy/idle status changes and
-    turn-complete notifications to every connected client. No session filtering —
-    the browser-side JS decides which agent to update.
+    turn-complete notifications to every connected client.
+    DEPRECATED: Use unified GET /api/realtime/stream?channels=status instead.
 
     Events:
         event: agent_busy_changed
         data: {"agent_id": "...", "busy": true|false, "session_id": "..."}
 
         event: agent_turn_complete
-        data: {"agent_id": "...", "agent_name": "...", "response": "..."}
+        data: {"agent_id": "...", "agent_name": "...", "response": "...",
+               "external_user_id": "...", "session_id": "..."}
     """
+    import logging as _log_depr
+    _log_depr.getLogger(__name__).warning(
+        "DEPRECATED endpoint /api/agents/status/stream used — "
+        "migrate to /api/realtime/stream?channels=status")
     import queue as _queue
     from backend.event_stream import event_stream
+
+    # Release the thread-local DB connection acquired by enforce_auth.
+    db.close()
 
     q = _queue.Queue(maxsize=200)
 
@@ -1888,6 +1978,7 @@ def api_agents_status_stream():
                 'agent_name': data.get('agent_name', ''),
                 'response': response,
                 'session_id': data.get('session_id', ''),
+                'external_user_id': data.get('external_user_id', ''),
             }
             q.put_nowait(('turn', payload))
         except _queue.Full:

@@ -197,6 +197,7 @@ def _build_static_prompt(agent: Dict[str, Any]) -> str:
 
     # Inject system_prompt from assigned tool definitions
     assigned_ids = set(db.get_agent_tools(eid))
+
     if assigned_ids:
         seen_fn_names = set()
         for tool_def in tool_registry.get_all_tool_defs():
@@ -326,6 +327,22 @@ def _build_static_prompt(agent: Dict[str, Any]) -> str:
         "needed. Do not keep unused skills in context; they waste tokens by "
         "adding stale tool definitions."
     )
+    # Build operations rule: inject for agents that have bash or runpy tools.
+    # This ensures long-running compilations don't block the agent.
+    if assigned_ids and ('bash' in assigned_ids or 'runpy' in assigned_ids):
+        parts.append("\n## Build Operations Rule\n")
+        parts.append(
+            "Every build operation (cmake, make, ninja, gcc, g++, cargo build, "
+            "go build, npm build, or any long-running compilation) MUST be "
+            "executed inside a tmux or screen session. Never run these commands "
+            "directly in bash — they will block the agent. **Dependency "
+            "priority**: (1) `tmux` — `tmux new-session -d -s build \"cd "
+            "/path && make 2>&1 | tee build.log\"` then monitor with `tmux "
+            "capture-pane -t build -p`. (2) `screen` — fallback if tmux "
+            "not available. (3) `nohup` — last resort if neither tmux "
+            "nor screen available."
+        )
+    
 
     # Inform all agents about /_self/ access to their local config directory
     parts.append("\n## Agent Home Directory")
@@ -566,6 +583,7 @@ def build_system_prompt(agent: Dict[str, Any]) -> str:
         slash_commands.append(("/restart", "Restart the service (super agent only)"))
         slash_commands.append(("/cwd", "Show current workspace directory"))
         slash_commands.append(("/cd", "Change workspace directory"))
+        slash_commands.append(("/shutdown", "Shut down the Evonic server completely (super agent only)"))
     # /autopilot is not yet implemented, omit from listing
 
     if slash_commands:
@@ -580,26 +598,28 @@ def build_system_prompt(agent: Dict[str, Any]) -> str:
             artifacts_note = (
                 f"Your artifacts directory is: `{artifacts_path}`\n"
                 "Files you save here will appear in the Artifacts tab on your agent detail page.\n"
-                "Use `save_artifact` tool for text files, or write files directly to this path "
-                "using `write_file` or bash/runpy for binary files (PDFs, images).\n"
+                "Use `save_artifact(source_path=\"...\")` for files already on disk (binaries, images, PDFs) "
+                "or `save_artifact(content=\"...\")` for text generated in your response.\n"
                 "You can also access it via `/_self/artifacts/` with any file tool.\n\n"
                 f"**Artifact public URL**: `/api/agents/{aid}/artifacts/<filename>`\n"
                 "This URL serves the file directly in the browser (no download prompt for images).\n"
-                "To display an image inline in chat, save it via `save_artifact(mode=\"base64\")` "
+                "To display an image inline in chat, save it via `save_artifact(source_path=\"...\")` "
                 f"then embed in your markdown response: `<img src=\"/api/agents/{aid}/artifacts/filename.webp\" alt=\"...\">`\n\n"
                 "**Important**: `/_self/` paths only work with file tools (`read_file`, `write_file`, `patch`, `str_replace`) "
                 "— NOT with `bash` or `runpy`. When saving from bash/runpy, use the full workspace path "
-                f"`{artifacts_path}` or the `save_artifact` tool. For binary files from bash/runpy, always use `save_artifact(mode=\"base64\")`."
+                f"`{artifacts_path}` or the `save_artifact` tool."
             )
         else:
             artifacts_note = (
                 f"Your artifacts are served at: `/api/agents/{aid}/artifacts/<filename>`\n"
                 "Use the `save_artifact` tool to save files. "
+                "Use `save_artifact(source_path=\"...\")` for files already on disk (binaries, images) "
+                "or `save_artifact(content=\"...\")` for text generated in your response. "
                 "You can also access the directory via `/_self/artifacts/` with file tools.\n\n"
-                "To display an image inline in chat: save it via `save_artifact(mode=\"base64\")` "
+                "To display an image inline in chat: save it via `save_artifact(source_path=\"...\")` "
                 f"then embed in your markdown response: `<img src=\"/api/agents/{aid}/artifacts/filename.webp\" alt=\"...\">`\n\n"
                 "**Important**: `/_self/` paths only work with file tools (`read_file`, `write_file`, `patch`, `str_replace`) "
-                "— NOT with `bash` or `runpy`. For binary files, always use `save_artifact(mode=\"base64\")`."
+                "— NOT with `bash` or `runpy`."
             )
         prompt += "\n\n## Artifacts Directory\n" + artifacts_note
 
@@ -728,6 +748,18 @@ def build_tools(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
                     for old, new in replacements:
                         desc = desc.replace(old, new)
                     param_def['description'] = desc
+
+    # Strip empty description strings from all tool definitions.
+    # OpenAI function calling spec treats description as optional;
+    # removing empty strings saves tokens without losing information.
+    for tool in tools:
+        func = tool.get('function', {})
+        if isinstance(func.get('description'), str) and func['description'] == '':
+            del func['description']
+        for param_def in func.get('parameters', {}).get('properties', {}).values():
+            if isinstance(param_def, dict) and isinstance(param_def.get('description'), str) and param_def['description'] == '':
+                del param_def['description']
+
     return tools
 
 

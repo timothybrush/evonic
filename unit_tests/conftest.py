@@ -55,7 +55,7 @@ def use_test_database(monkeypatch, tmp_path):
     
     # Set test database path and clear cached connection so _connect() uses the new path
     db_module.db.db_path = test_db_path
-    db_module.db._tlocal = _threading.local()
+    db_module.db._tls = _threading.local()
 
     # Reinitialize tables in test database
     db_module.db._init_tables()
@@ -63,7 +63,7 @@ def use_test_database(monkeypatch, tmp_path):
     yield
 
     # Restore original path and reset connection cache
-    db_module.db._tlocal = _threading.local()
+    db_module.db._tls = _threading.local()
     db_module.db.db_path = original_path
 
 
@@ -88,3 +88,15 @@ def ensure_super_agent(use_test_database):
             'system_prompt': '',
             'is_super': True,
         })
+
+
+@pytest.fixture(autouse=True)
+def enable_testing_mode():
+    """Set TESTING=True so the Werkzeug test client bypasses CSRF protection.
+
+    flask.Flask.test_client() does NOT automatically set TESTING=True,
+    so the CSRF before_request hook would block all POST/PUT/DELETE
+    requests from unit tests.  This fixture fixes that.
+    """
+    from app import app
+    app.config['TESTING'] = True

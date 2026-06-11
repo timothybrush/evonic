@@ -1,4 +1,5 @@
 import os
+import secrets
 
 from flask import jsonify, redirect, request, session, url_for
 import re
@@ -36,6 +37,7 @@ from routes.logs import logs_bp
 from routes.safety_rules import safety_rules_bp
 from routes.update import update_bp
 from routes.rtk import rtk_bp
+from routes.realtime import realtime_bp
 import config
 from backend.version import get_version
 
@@ -66,6 +68,8 @@ app.secret_key = config.SECRET_KEY
 # Make session permanent so it survives mobile browser backgrounding / restarts
 from datetime import timedelta
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_HTTPONLY'] = True
 
 # Global upload size limit (defense-in-depth for all endpoints)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB
@@ -73,6 +77,12 @@ app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB
 # Trust proxy headers from Cloudflare / nginx / any reverse proxy
 from werkzeug.middleware.proxy_fix import ProxyFix
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
+# Response compression. COMPRESS_STREAMS must stay False so SSE endpoints
+# (/api/realtime/stream, chat streams) are never buffered by compression.
+from flask_compress import Compress
+app.config['COMPRESS_STREAMS'] = False
+Compress(app)
 
 app.register_blueprint(auth_bp)
 app.register_blueprint(agents_bp)
@@ -91,6 +101,7 @@ app.register_blueprint(logs_bp)
 app.register_blueprint(safety_rules_bp)
 app.register_blueprint(update_bp)
 app.register_blueprint(rtk_bp)
+app.register_blueprint(realtime_bp)
 
 
 # ---- Backward-compatible redirect: /settings/* → /system/* ----
@@ -403,6 +414,85 @@ def inject_version():
     return {'evonic_version': get_version()}
 
 
+@app.teardown_request
+def _close_db_connection(exc):
+    """Close thread-local DB connection after each request.
+
+    Flask's dev server creates a new thread per request. Without this,
+    SQLite connections accumulate until GC runs → "Too many open files".
+    """
+    db.close()
+
+def _csrf_exempt(path):
+    """Return True if the path should skip CSRF validation."""
+    if path in ('/login', '/logout', '/setup',
+                '/api/health', '/api/connector/pair',
+                '/api/setup', '/api/setup/test-connection', '/api/setup/docker-status'):
+        return True
+    if path.startswith(('/static/', '/webhook', '/plugin/', '/ws/',
+                        '/api/channels/whatsapp-bridge/')):
+        return True
+    if path.endswith('/download-binary') and path.startswith('/api/workplaces/'):
+        return True
+    return False
+
+
+@app.before_request
+def csrf_protect():
+    """Double-submit cookie CSRF protection for all state-changing requests."""
+    if request.method in ('GET', 'HEAD', 'OPTIONS'):
+        return None
+    if _csrf_exempt(request.path):
+        return None
+    if app.testing or os.environ.get('PYTEST_CURRENT_TEST'):
+        return None
+
+    token_header = request.headers.get('X-CSRF-Token', '')
+    token_form = request.form.get('csrf_token', '')
+    submitted = token_header or token_form
+    cookie_token = request.cookies.get('csrf_token', '')
+
+    if not submitted or not cookie_token:
+        return jsonify({'error': 'CSRF token missing'}), 403
+    if not secrets.compare_digest(submitted, cookie_token):
+        return jsonify({'error': 'CSRF token mismatch'}), 403
+    return None
+
+
+@app.after_request
+def set_static_cache_headers(response):
+    """Long-lived caching for /static/ assets.
+
+    Safe because every static reference carries a `?v=N` cache-buster —
+    bump the version when an asset changes. Scoped to /static/ only so
+    dynamic responses (e.g. agent avatars) are never cached.
+    """
+    if request.path.startswith('/static/') and not config.DEBUG:
+        response.headers['Cache-Control'] = 'public, max-age=604800, immutable'
+    return response
+
+
+@app.after_request
+def set_csrf_cookie(response):
+    """Ensure csrf_token cookie exists on every response (for login page, first visit, etc.)."""
+    if 'csrf_token' not in request.cookies:
+        token = secrets.token_hex(32)
+        response.set_cookie(
+            'csrf_token', token,
+            httponly=False,
+            samesite='Strict',
+            secure=not config.DEBUG,
+            path='/',
+            max_age=604800,
+        )
+    return response
+
+
+# Set-once cache for the super-agent existence check (queried on every request).
+# Safe because a super agent can never be deleted or disabled once created.
+_super_agent_exists = False
+
+
 @app.before_request
 def enforce_auth():
     """Enforce authentication on all API endpoints and page routes.
@@ -437,7 +527,10 @@ def enforce_auth():
         return None
 
     # --- Setup flow: when no super agent exists, redirect everything else ---
-    if not db.has_super_agent():
+    global _super_agent_exists
+    if not _super_agent_exists:
+        _super_agent_exists = db.has_super_agent()
+    if not _super_agent_exists:
         if request.path.startswith('/api/'):
             return jsonify({'error': 'Super agent setup required', 'setup_required': True}), 503
         return redirect('/setup')

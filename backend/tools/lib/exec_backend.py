@@ -125,6 +125,26 @@ class ExecutionBackend(ABC):
     def make_dirs(self, path: str) -> dict:
         """Create directories recursively. Returns {'ok': True} or {'error': str}."""
 
+    @abstractmethod
+    def cat_file_bytes(self, path: str) -> dict:
+        """Read a file as raw bytes from the execution environment.
+
+        Used by save_artifact to stream file contents from sandbox (tmpfs),
+        SSH remote, or tunnel — places where shutil.copy2 / docker cp cannot reach.
+
+        Returns {'bytes': b'...'} or {'error': str}.
+        """
+
+    @abstractmethod
+    def delete_file(self, path: str) -> dict:
+        """Delete a file from the execution environment.
+
+        Used by save_artifact to remove the source file after a verified
+        move into the artifacts directory.
+
+        Returns {'ok': True} on success or {'error': str} on failure.
+        """
+
     # ------------------------------------------------------------------
     # Path resolution — converts a host filesystem path into the
     # path the backend's execution environment can access.
@@ -181,7 +201,9 @@ class BackendRegistry:
             backend = DockerBackend(session_id, agent_id=agent_id, workspace=workspace)
         else:
             from backend.tools.lib.backends.local_backend import LocalBackend
-            backend = LocalBackend(session_id=session_id, workspace=workspace)
+            run_as_user = (agent_context or {}).get('run_as_user') or None
+            backend = LocalBackend(session_id=session_id, workspace=workspace,
+                                   run_as_user=run_as_user)
 
         # Don't store default backends — they're ephemeral and session-keyed
         # internally by DockerBackend itself. Only explicit overrides are stored.

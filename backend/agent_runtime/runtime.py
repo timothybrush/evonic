@@ -41,6 +41,7 @@ from backend.agent_runtime.prefetch import TurnPrefetcher
 import atexit
 import re
 from config import AGENT_MAX_TOOL_RESULT_CHARS as MAX_TOOL_RESULT_CHARS
+from config import STALE_SESSION_INJECTION_ENABLED, STALE_SESSION_THRESHOLD_SECONDS
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _LOGS_DIR = os.path.join(_BASE_DIR, 'logs')
@@ -88,15 +89,35 @@ def _should_wrap_user_message(agent: dict) -> bool:
     return global_val != '0'
 
 
-def _apply_wrapper_prefix(messages: list, enabled: bool) -> None:
+def _apply_wrapper_prefix(messages: list, enabled: bool,
+                          is_stale: bool = False,
+                          stale_threshold: int = 25200) -> None:
     """Apply message wrapper prefix to user messages in-place.
 
     Wraps: (a) the LAST (current) user message when it has >= 4 words,
            (b) historical messages explicitly marked with _wrapped=True.
     Cleans up the _wrapped key after use.
+
+    When is_stale is True, appends a staleness-awareness note to the wrapper
+    prefix prompting the agent to assess whether conversation history is
+    still relevant.
     """
     if not enabled or not messages:
         return
+
+    # Build effective wrapper prefix — may include staleness notice
+    effective_prefix = WRAPPER_PREFIX
+    if is_stale:
+        hours = max(1, stale_threshold // 3600)
+        staleness_note = (
+            f"[STALENESS NOTICE] The previous message in this session was sent "
+            f"more than {hours} hour{'s' if hours != 1 else ''} ago. "
+            f"Consider whether the conversation history is still relevant. "
+            f"If topics have shifted, suggest the user run /clear to reset "
+            f"context.\n\n"
+        )
+        effective_prefix = WRAPPER_PREFIX + staleness_note
+
     for i, msg in enumerate(messages):
         if msg.get('role') == 'user':
             _wrapped = msg.pop('_wrapped', None)
@@ -114,7 +135,7 @@ def _apply_wrapper_prefix(messages: list, enabled: bool) -> None:
                     if is_current and len(_text.split()) < 4:
                         continue
                     if _text_part_idx is not None:
-                        content[_text_part_idx]['text'] = WRAPPER_PREFIX + _text
+                        content[_text_part_idx]['text'] = effective_prefix + _text
                 else:
                     # Plain string content
                     # Skip wrapper injection for short current-turn messages
@@ -123,7 +144,7 @@ def _apply_wrapper_prefix(messages: list, enabled: bool) -> None:
                     # wrapper would waste tokens.
                     if is_current and len(content.split()) < 4:
                         continue
-                    msg['content'] = WRAPPER_PREFIX + content
+                    msg['content'] = effective_prefix + content
 
 
 def _db_retry(
@@ -833,6 +854,17 @@ class AgentRuntime:
         # Kill any running tool subprocess for this session
         from backend.tools.lib.process_tracker import process_tracker
         process_tracker.kill(session_id)
+
+    def summarize_session(self, agent: dict, session_id: str) -> bool:
+        """Trigger summarization for a session. Public API for slash commands.
+
+        Returns True if a summary was actually generated and persisted."""
+        return _sum.maybe_summarize(
+            agent, session_id,
+            self._llm_serializer._summarize_guard,
+            self._llm_serializer._summarize_active,
+            self._llm_serializer._llm_lock,
+        )
 
     def handle_message(self, agent_id: str, external_user_id: str,
                        message: str, channel_id: Optional[str] = None,
@@ -1569,6 +1601,11 @@ class AgentRuntime:
                     if _tid not in _existing:
                         assigned_tool_ids.append(_tid)
 
+            # Agents with save_artifact automatically get list_artifacts.
+            # No DB assignment needed — every artifacts-enabled agent can search their files.
+            if 'save_artifact' in assigned_tool_ids and 'list_artifacts' not in assigned_tool_ids:
+                assigned_tool_ids.append('list_artifacts')
+
             # Resolve workspace: workplace config takes priority over agent.workspace.
             # For tunnel workplaces, never fall back to the agent's /workspace path —
             # Evonet runs on the remote device and has its own working directory.
@@ -1679,8 +1716,31 @@ class AgentRuntime:
                 ms = AgentState(mode="execute", auto_trivial=True)
             agent_context['agent_state'] = ms
 
+        # --- Staleness detection ---
+        # Detect when the previous user message is older than the threshold
+        # and mark as stale so the wrapper prefix can inject context awareness.
+        is_stale = False
+        stale_threshold = STALE_SESSION_THRESHOLD_SECONDS
+        _stale_skip = (
+            ctx.external_user_id.startswith('__agent__') or
+            ctx.external_user_id.startswith('__system__')
+        )
+        if not _stale_skip:
+            _stale_enabled = agent.get('stale_session_injection_enabled')
+            if _stale_enabled is None:
+                _stale_enabled = STALE_SESSION_INJECTION_ENABLED
+            if _stale_enabled:
+                _recent = chatlog.tail(limit=50)
+                _user_entries = [e for e in _recent if e.get('type') == 'user']
+                if len(_user_entries) >= 2:
+                    _prev_ts = _user_entries[-2].get('ts', 0)
+                    _gap = time.time() - _prev_ts
+                    if _gap > stale_threshold:
+                        is_stale = True
+
         # Apply preference wrapper prefix to user messages if enabled
-        _apply_wrapper_prefix(messages, _should_wrap_user_message(agent))
+        _apply_wrapper_prefix(messages, _should_wrap_user_message(agent),
+                              is_stale=is_stale, stale_threshold=stale_threshold)
 
         # Call LLM with tool loop
         _inner_turn_start = time.time()

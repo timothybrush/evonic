@@ -402,6 +402,19 @@ class SchemaMixin:
             except sqlite3.OperationalError:
                 pass
 
+            # Migration: normalize avatar_path from absolute to relative
+            # (makes backup/restore portable across different install paths)
+            cursor.execute("SELECT id, avatar_path FROM agents WHERE avatar_path IS NOT NULL AND avatar_path != ''")
+            rows = cursor.fetchall()
+            for agent_id, avatar_path in rows:
+                if os.path.isabs(avatar_path):
+                    if 'shared/avatars/' in avatar_path:
+                        idx = avatar_path.find('shared/avatars/')
+                        rel_path = avatar_path[idx:]
+                    else:
+                        rel_path = os.path.join('shared', 'avatars', agent_id, os.path.basename(avatar_path))
+                    cursor.execute("UPDATE agents SET avatar_path = ? WHERE id = ?", (rel_path, agent_id))
+
             # Migration: add disable_parallel_tool_execution toggle (default OFF = feature runs)
             try:
                 cursor.execute("ALTER TABLE agents ADD COLUMN disable_parallel_tool_execution BOOLEAN DEFAULT 0")
@@ -464,6 +477,12 @@ class SchemaMixin:
             # Migration: enable inject_agent_id and inject_datetime for all existing agents
             cursor.execute("UPDATE agents SET inject_agent_id = 1 WHERE inject_agent_id = 0 OR inject_agent_id IS NULL")
             cursor.execute("UPDATE agents SET inject_datetime = 1 WHERE inject_datetime = 0 OR inject_datetime IS NULL")
+
+            # Migration: add run_as_user for per-agent local execution user isolation
+            try:
+                cursor.execute("ALTER TABLE agents ADD COLUMN run_as_user TEXT DEFAULT NULL")
+            except sqlite3.OperationalError:
+                pass
 
             # Agent Variables (per-agent key-value config used by tools/skills)
             cursor.execute("""
@@ -573,6 +592,12 @@ class SchemaMixin:
                 )
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_schedule_logs_schedule ON schedule_logs(schedule_id, executed_at)")
+
+            # Migration: add action_output column to schedule_logs
+            try:
+                cursor.execute("ALTER TABLE schedule_logs ADD COLUMN action_output TEXT")
+            except sqlite3.OperationalError:
+                pass
 
             # ==================== LLM Models Table ====================
 

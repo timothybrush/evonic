@@ -3115,16 +3115,20 @@ def _info(msg):
     print(f"  {_INFO}  {msg}")
 
 
-def doctor_command(quick=False):
+def doctor_command(quick=False, fix=False):
     """Run comprehensive system health diagnostics."""
     import importlib
     import json
     import platform
 
-    print(f"\n{_BOLD}{_C}🩺  Evonic Doctor{_RESET}")
+    if fix:
+        print(f"\n{_BOLD}{_C}🩺  Evonic Doctor (fix mode){_RESET}")
+    else:
+        print(f"\n{_BOLD}{_C}🩺  Evonic Doctor{_RESET}")
     print(f"{_DIM}System diagnostics & health check{_RESET}")
 
     results = []
+    fixes_applied = []
 
     # ── 1. Environment Check ──────────────────────────────────
     _section("1. Environment Check")
@@ -3603,6 +3607,72 @@ def doctor_command(quick=False):
             )
         )
 
+    # ── 9. Artifact Tool Consistency Check ───────────────────────────────────
+    _section("9. Artifact Tool Consistency Check")
+
+    try:
+        from models.db import db
+
+        agents = db.get_agents()
+        missing_save = []
+        spurious_save = []
+
+        for a in agents:
+            aid = a.get("id", "?")
+            aname = a.get("name", aid)
+            artifacts_on = a.get("artifacts_enabled") not in (False, 0, None)
+            agent_tools = db.get_agent_tools(aid)
+            has_save = "save_artifact" in agent_tools
+
+            if artifacts_on and not has_save:
+                missing_save.append((aid, aname))
+            elif not artifacts_on and has_save:
+                spurious_save.append((aid, aname))
+
+        if missing_save:
+            for aid, aname in missing_save:
+                results.append(_warn(
+                    f"Agent '{aname}' ({aid}) has artifacts_enabled=1 but "
+                    f"missing 'save_artifact' tool assignment"
+                ))
+            if fix:
+                for aid, aname in missing_save:
+                    try:
+                        db.add_agent_tool(aid, "save_artifact")
+                        fixes_applied.append(
+                            f"Added 'save_artifact' tool to agent '{aname}' ({aid})"
+                        )
+                    except Exception as e:
+                        results.append(_fail(
+                            f"Failed to add save_artifact to '{aid}': {e}"
+                        ))
+        else:
+            results.append(_ok("All artifacts-enabled agents have save_artifact tool"))
+
+        if spurious_save:
+            for aid, aname in spurious_save:
+                results.append(_warn(
+                    f"Agent '{aname}' ({aid}) has artifacts_enabled=0 but "
+                    f"has 'save_artifact' tool assigned (should be removed)"
+                ))
+            if fix:
+                for aid, aname in spurious_save:
+                    try:
+                        db.remove_agent_tool(aid, "save_artifact")
+                        fixes_applied.append(
+                            f"Removed 'save_artifact' tool from agent '{aname}' ({aid})"
+                        )
+                    except Exception as e:
+                        results.append(_fail(
+                            f"Failed to remove save_artifact from '{aid}': {e}"
+                        ))
+        elif not missing_save:
+            if not spurious_save:
+                _info("  All agents have consistent artifact tool assignment")
+
+    except Exception as e:
+        results.append(_fail(f"Artifact tool check failed: {e}"))
+
     # ── Summary ───────────────────────────────────────────────
     _section("Summary")
 
@@ -3619,6 +3689,11 @@ def doctor_command(quick=False):
         print(f"  {_Y}⚠ Warnings:{_RESET} {warnings}")
     if failed:
         print(f"  {_R}✗ Failed:{_RESET}  {failed}")
+
+    if fixes_applied:
+        print(f"\n  {_BOLD}{_C}Fixes applied:{_RESET} {len(fixes_applied)}")
+        for fix_msg in fixes_applied:
+            print(f"    {_G}→{_RESET} {fix_msg}")
 
     if failed > 0:
         print(f"\n{_R}{_BOLD}  System has issues that need attention.{_RESET}")
@@ -4163,6 +4238,39 @@ def _create_rollback_copies(file_list):
     return rollbacks
 
 
+def _fixup_avatar_paths():
+    """Normalize avatar_path from absolute to relative in the restored database.
+
+    Old backups store absolute file paths (e.g. /home/user/evonic/shared/avatars/...)
+    which break when restored to a different machine or directory.  This rewrites
+    them to relative paths (shared/avatars/...) so the server can resolve them
+    against the current ROOT on startup.
+    """
+    db_path = os.path.join(ROOT, "shared", "db", "evonic.db")
+    if not os.path.exists(db_path):
+        return
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.execute("SELECT id, avatar_path FROM agents WHERE avatar_path IS NOT NULL AND avatar_path != ''")
+        rows = cur.fetchall()
+        fixed = 0
+        for agent_id, avatar_path in rows:
+            if os.path.isabs(avatar_path):
+                if 'shared/avatars/' in avatar_path:
+                    idx = avatar_path.find('shared/avatars/')
+                    rel_path = avatar_path[idx:]
+                else:
+                    rel_path = os.path.join('shared', 'avatars', agent_id, os.path.basename(avatar_path))
+                conn.execute("UPDATE agents SET avatar_path = ? WHERE id = ?", (rel_path, agent_id))
+                fixed += 1
+        if fixed:
+            conn.commit()
+            print(f"  Fixed {fixed} avatar path(s) in restored database")
+        conn.close()
+    except Exception as e:
+        print(f"  Warning: avatar path fixup failed: {e}")
+
+
 def _rollback_restore(rollbacks):
     """Restore all .bak copies (reverse the restore)."""
     restored = 0
@@ -4543,6 +4651,9 @@ def restore_command(backup_file, dry_run=False, force=False, no_restart=False):
         
         print(f"  {restored} files restored" + (f", {skipped} skipped" if skipped else ""))
         
+        # Fixup avatar paths from absolute to relative for portability
+        _fixup_avatar_paths()
+
         # Step 9: Post-restore validation
         print("Validating restored database...")
         valid, msg = _validate_restored_db()

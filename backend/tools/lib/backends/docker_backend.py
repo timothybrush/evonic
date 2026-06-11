@@ -631,6 +631,8 @@ class DockerBackend(ExecutionBackend):
             '    with open(p, "rb") as f:\n'
             '        data = f.read()\n'
             '    print(json.dumps({"content": base64.b64encode(data).decode("ascii")}))\n'
+            'except IsADirectoryError:\n'
+            f'    print(json.dumps({{"error": "Path is a directory, not a file: " + {_json.dumps(path)}}}))\n'
             'except Exception as e:\n'
             '    print(json.dumps({"error": str(e)}))\n'
         )
@@ -684,6 +686,65 @@ class DockerBackend(ExecutionBackend):
             'try:\n'
             '    os.makedirs(p, exist_ok=True)\n'
             '    print(json.dumps({"ok": True}))\n'
+            'except Exception as e:\n'
+            '    print(json.dumps({"error": str(e)}))\n'
+        )
+        r = self._container_exec_python(code, timeout=30)
+        if 'error' in r:
+            return r
+        try:
+            return _json.loads(r.get('stdout', '{}'))
+        except Exception:
+            return {'error': 'Failed to parse response from container'}
+
+    def cat_file_bytes(self, path: str) -> dict:
+        """Read a file as raw bytes from inside the container.
+
+        Uses ``docker exec`` to stream the file content (base64-encoded for
+        binary safety), which can read from tmpfs mounts that ``docker cp``
+        cannot access.
+        """
+        import json as _json, base64 as _b64
+        code = (
+            'import base64, json\n'
+            f'p = {_json.dumps(path)}\n'
+            'try:\n'
+            '    with open(p, "rb") as f:\n'
+            '        data = f.read()\n'
+            '    print(json.dumps({"data": base64.b64encode(data).decode("ascii")}))\n'
+            'except Exception as e:\n'
+            '    print(json.dumps({"error": str(e)}))\n'
+        )
+        r = self._container_exec_python(code, timeout=60)
+        if 'error' in r:
+            return r
+        try:
+            result = _json.loads(r.get('stdout', '{}'))
+        except Exception:
+            return {'error': 'Failed to parse response from container'}
+        if 'error' in result:
+            return result
+        data = _b64.b64decode(result['data'])
+        return {'bytes': data}
+
+    def delete_file(self, path: str) -> dict:
+        """Delete a file from inside the container.
+
+        Uses ``docker exec`` to run ``os.remove(path)`` inside the container.
+        """
+        import json as _json
+        code = (
+            'import json, os\n'
+            f'p = {_json.dumps(path)}\n'
+            'try:\n'
+            '    os.remove(p)\n'
+            '    print(json.dumps({"ok": True}))\n'
+            'except FileNotFoundError:\n'
+            '    print(json.dumps({"error": "File not found"}))\n'
+            'except PermissionError:\n'
+            '    print(json.dumps({"error": "Permission denied"}))\n'
+            'except IsADirectoryError:\n'
+            '    print(json.dumps({"error": "Path is a directory, not a file"}))\n'
             'except Exception as e:\n'
             '    print(json.dumps({"error": str(e)}))\n'
         )

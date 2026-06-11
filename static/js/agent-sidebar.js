@@ -30,6 +30,68 @@ function _sidebarAvatarColor(agentId) {
     return _AVATAR_COLORS[_sidebarHash(agentId) % _AVATAR_COLORS.length];
 }
 
+/** --- Unread state (persists across page navigations via sessionStorage) --- */
+var _UNREAD_KEY = 'evonic_unread_agents';
+
+function _getUnreadSet() {
+    try {
+        return new Set(JSON.parse(sessionStorage.getItem(_UNREAD_KEY) || '[]'));
+    } catch (_) { return new Set(); }
+}
+
+function _markUnread(agentId) {
+    try {
+        var s = _getUnreadSet();
+        s.add(agentId);
+        sessionStorage.setItem(_UNREAD_KEY, JSON.stringify(Array.from(s)));
+    } catch (_) {}
+}
+
+function _clearUnread(agentId) {
+    try {
+        var s = _getUnreadSet();
+        s.delete(agentId);
+        sessionStorage.setItem(_UNREAD_KEY, JSON.stringify(Array.from(s)));
+    } catch (_) {}
+    var avatar = document.querySelector(
+        '#agent-sidebar .agent-avatar[data-agent-id="' + CSS.escape(agentId) + '"]'
+    );
+    if (avatar) avatar.removeAttribute('data-unread');
+}
+
+/** Update which avatar has the .selected ring based on current URL */
+function _updateSelectedAvatar() {
+    var match = window.location.pathname.match(/^\/agents\/([^/]+)/);
+    var currentId = match ? decodeURIComponent(match[1]) : null;
+    document.querySelectorAll('#agent-sidebar .agent-avatar').forEach(function (el) {
+        el.classList.toggle('selected', currentId !== null && el.getAttribute('data-agent-id') === currentId);
+    });
+}
+
+/**
+ * Navigate to an agent's chat tab. On agent detail pages softSwitchAgent()
+ * swaps the page in place without a full reload; everywhere else (and on
+ * soft-switch failure) fall back to a normal navigation.
+ */
+function _navigateToAgentChat(agentId) {
+    _clearUnread(agentId);
+    var dest = '/agents/' + encodeURIComponent(agentId) + '#chat';
+    if (typeof window.softSwitchAgent === 'function') {
+        // softSwitchAgent manages its own loading bar across the in-place swap
+        window.softSwitchAgent(agentId).then(function (ok) {
+            if (ok) {
+                _updateSelectedAvatar();
+            } else {
+                window.location = dest;
+            }
+        });
+    } else {
+        // Full navigation: show the bar until the new page replaces it
+        if (window.startNavProgress) window.startNavProgress();
+        window.location = dest;
+    }
+}
+
 /** Current tooltip element reference */
 var _currentTooltip = null;
 
@@ -57,6 +119,7 @@ function renderSidebar(agents) {
         avatar.className = 'agent-avatar';
         avatar.setAttribute('data-agent-id', agent.id);
         avatar.setAttribute('data-busy', agent.busy ? 'true' : 'false');
+        if (_getUnreadSet().has(agent.id)) avatar.setAttribute('data-unread', 'true');
         avatar.setAttribute('title', agent.name);
 
         if (agent.avatar_path) {
@@ -83,10 +146,12 @@ function renderSidebar(agents) {
         }
 
         avatar.addEventListener('click', function () {
-            window.location = '/agents/' + encodeURIComponent(agent.id) + '#chat';
+            _navigateToAgentChat(agent.id);
         });
 
         avatar.addEventListener('mouseenter', function (e) {
+            // Skip tooltip popup on mobile — tap goes directly to agent detail
+            if (window.innerWidth <= 768) return;
             showTooltip(e, agent);
         });
 
@@ -99,6 +164,7 @@ function renderSidebar(agents) {
 
     // Apply saved sidebar state after all elements (including burger) are rendered
     _applySidebarState();
+    _updateSelectedAvatar();
 }
 
 /** Create and position tooltip */
@@ -203,7 +269,7 @@ function dismissBubble(agentId) {
  * The bubble displays a truncated preview of the agent's final response.
  * Clicking the bubble navigates to the agent detail chat tab.
  */
-function showBubblePopup(agentId, agentName, response, sessionId) {
+function showBubblePopup(agentId, agentName, response, sessionId, externalUserId) {
     var avatar = document.querySelector(
         '#agent-sidebar .agent-avatar[data-agent-id="' + CSS.escape(agentId) + '"]'
     );
@@ -218,6 +284,7 @@ function showBubblePopup(agentId, agentName, response, sessionId) {
     var bubble = document.createElement('div');
     bubble.className = 'agent-bubble-popup';
     if (sessionId) bubble.setAttribute('data-session-id', sessionId);
+    if (externalUserId) bubble.setAttribute('data-external-user-id', externalUserId);
 
     // Arrow pointing left toward the avatar
     var arrow = document.createElement('div');
@@ -253,11 +320,12 @@ function showBubblePopup(agentId, agentName, response, sessionId) {
         if (e.target === closeBtn) return;
         dismissBubble(agentId);
         var bubbleSessionId = bubble.getAttribute('data-session-id');
-        if (bubbleSessionId) {
+        var externalUserId = bubble.getAttribute('data-external-user-id');
+        if (bubbleSessionId && externalUserId !== 'web_test') {
             sessionStorage.setItem('evonic_last_session', bubbleSessionId);
             window.location = '/sessions';
         } else {
-            window.location = '/agents/' + encodeURIComponent(agentId) + '#chat';
+            _navigateToAgentChat(agentId);
         }
     });
 
@@ -305,36 +373,65 @@ document.addEventListener('click', function (e) {
     }
 });
 
-/** Subscribe to SSE for real-time busy state updates and turn-complete notifications */
+/** Subscribe via RealtimeClient for real-time busy state updates and turn-complete notifications */
+var _statusSSE = null;
 function subscribeBusySSE() {
-    try {
-        var es = new EventSource('/api/agents/status/stream');
-        es.addEventListener('agent_busy_changed', function (e) {
-            try {
-                var payload = JSON.parse(e.data);
-                var avatar = document.querySelector(
-                    '#agent-sidebar .agent-avatar[data-agent-id="' + CSS.escape(payload.agent_id) + '"]'
-                );
-                if (avatar) {
-                    avatar.setAttribute('data-busy', payload.busy ? 'true' : 'false');
-                }
-            } catch (_) {}
-        });
-        es.addEventListener('agent_turn_complete', function (e) {
-            try {
-                var payload = JSON.parse(e.data);
-                // Don't show bubble if user is already viewing this agent's page
-                if (window.location.pathname === '/agents/' + payload.agent_id) return;
-                showBubblePopup(payload.agent_id, payload.agent_name, payload.response, payload.session_id);
-            } catch (_) {}
-        });
-        es.addEventListener('error', function () {
-            // EventSource will auto-reconnect; no action needed
-        });
-    } catch (_) {
-        // EventSource not supported — polling fallback already active
+    if (typeof RealtimeClient === 'undefined') {
+        // Fallback: use old EventSource if RealtimeClient not loaded
+        try {
+            _statusSSE = new EventSource('/api/agents/status/stream');
+            _statusSSE.addEventListener('agent_busy_changed', function (e) {
+                try {
+                    var payload = JSON.parse(e.data);
+                    var avatar = document.querySelector(
+                        '#agent-sidebar .agent-avatar[data-agent-id="' + CSS.escape(payload.agent_id) + '"]'
+                    );
+                    if (avatar) {
+                        avatar.setAttribute('data-busy', payload.busy ? 'true' : 'false');
+                    }
+                } catch (_) {}
+            });
+            _statusSSE.addEventListener('agent_turn_complete', function (e) {
+                try {
+                    var payload = JSON.parse(e.data);
+                    if (window.location.pathname === '/agents/' + payload.agent_id) return;
+                    _markUnread(payload.agent_id);
+                    var av = document.querySelector('#agent-sidebar .agent-avatar[data-agent-id="' + CSS.escape(payload.agent_id) + '"]');
+                    if (av) av.setAttribute('data-unread', 'true');
+                    showBubblePopup(payload.agent_id, payload.agent_name, payload.response, payload.session_id, payload.external_user_id);
+                } catch (_) {}
+            });
+            _statusSSE.addEventListener('error', function () {});
+        } catch (_) {}
+        return;
     }
+
+    var rt = window._evRealtime = window._evRealtime || new RealtimeClient({
+        channels: 'status'
+    });
+    rt.on('status', 'agent_busy_changed', function (payload) {
+        var avatar = document.querySelector(
+            '#agent-sidebar .agent-avatar[data-agent-id="' + CSS.escape(payload.agent_id) + '"]'
+        );
+        if (avatar) {
+            avatar.setAttribute('data-busy', payload.busy ? 'true' : 'false');
+        }
+    });
+    rt.on('status', 'agent_turn_complete', function (payload) {
+        if (window.location.pathname === '/agents/' + payload.agent_id) return;
+        _markUnread(payload.agent_id);
+        var av = document.querySelector('#agent-sidebar .agent-avatar[data-agent-id="' + CSS.escape(payload.agent_id) + '"]');
+        if (av) av.setAttribute('data-unread', 'true');
+        showBubblePopup(payload.agent_id, payload.agent_name, payload.response, payload.session_id, payload.external_user_id);
+    });
+    rt.start();
 }
+
+// Close SSE/RealtimeClient on page unload to free HTTP connections during navigation
+window.addEventListener('beforeunload', function () {
+    if (_statusSSE instanceof EventSource) { _statusSSE.close(); _statusSSE = null; }
+    if (window._evRealtime) { window._evRealtime.stop(); }
+});
 
 /** Toggle sidebar collapsed state */
 function toggleSidebar() {
@@ -375,6 +472,9 @@ function _applySidebarState() {
         if (burger) burger.classList.add('collapsed');
     }
 }
+
+// Update selected ring when browser navigates back/forward (soft-switch uses pushState)
+window.addEventListener('popstate', _updateSelectedAvatar);
 
 /** Initialize the sidebar */
 function initSidebar() {

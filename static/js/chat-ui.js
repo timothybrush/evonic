@@ -62,6 +62,514 @@ function installDiagnostic(ui, activeTurns, eventLog) {
     log('debug').info('window.__chatui diagnostic installed');
 }
 
+// ── lightbox.js ─────────────────────────────────────────────────
+
+const Lightbox = (function() {
+    let _images = [];
+    let _currentIndex = 0;
+    let _$overlay = null;
+    let _$img = null;
+    let _$prevBtn = null;
+    let _$nextBtn = null;
+    let _$counter = null;
+    let _$downloadBtn = null;
+    let _isOpen = false;
+    let _prevFocusedEl = null;
+    let _boundKeyHandler = null;
+    let _touchStartX = 0;
+    let _touchStartY = 0;
+
+    
+    function _collectChatImages($clickedImg) {
+        // Find the chat container — try common selectors, then fall back to document
+        const $chatContainer = $clickedImg.closest('#chat-messages, .chat-messages, [data-chat-container]');
+        const $scope = $chatContainer.length ? $chatContainer : $(document.body);
+        const images = [];
+        let startIndex = -1;
+
+        // Collect all visible images in chat that aren't avatars or lightbox internal
+        $scope.find('img').each(function() {
+            const $this = $(this);
+            // Skip avatar images (rounded-full is the avatar class)
+            if ($this.hasClass('rounded-full')) return;
+            // Skip lightbox internal images
+            if ($this.closest('.ev-lightbox-overlay').length) return;
+            // Skip images without a real src
+            const src = $this.attr('src');
+            if (!src) return;
+            // Skip tiny icons, data URIs that are likely icons
+            if (src.startsWith('data:image/svg+xml')) return;
+
+            images.push(src);
+            if (this === $clickedImg[0]) {
+                startIndex = images.length - 1;
+            }
+        });
+
+        if (!images.length) return null;
+        if (startIndex < 0) startIndex = 0;
+        return { urls: images, index: startIndex };
+    }
+
+    function _buildDOM() {
+        // Overlay backdrop — use inline CSS for z-index & bg opacity (Tailwind
+        // compiled CSS may not include arbitrary-value or opacity-modifier classes)
+        _$overlay = $('<div>')
+            .addClass('ev-lightbox-overlay fixed inset-0 hidden flex flex-col items-center justify-center')
+            .css({ zIndex: 9999, backgroundColor: 'rgba(0,0,0,0.9)' });
+
+        // Helper: build a nav button (close, prev, next) with inline styling
+        function _navBtn(cls, label, svgHtml, onClick) {
+            const sizes = {
+                close: { w: 48, h: 48, top: '16px', right: '16px', left: 'auto' },
+                prev:  { w: 40, h: 40, top: '50%', right: 'auto', left: '8px' },
+                next:  { w: 40, h: 40, top: '50%', right: '8px', left: 'auto' },
+            };
+            const s = sizes[cls] || sizes.close;
+            const $btn = $('<button>')
+                .addClass('ev-lightbox-' + cls + ' rounded-full text-white cursor-pointer duration-200')
+                .css({
+                    position: 'absolute',
+                    top: s.top,
+                    right: s.right,
+                    left: s.left,
+                    zIndex: 20,
+                    width: s.w + 'px',
+                    height: s.h + 'px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backgroundColor: 'rgba(255,255,255,0.1)',
+                    border: 'none',
+                    transform: cls !== 'close' ? 'translateY(-50%)' : 'none',
+                    transition: 'background-color 200ms ease',
+                    outline: 'none',
+                })
+                .attr('aria-label', label)
+                .attr('type', 'button')
+                .html(svgHtml)
+                .on('click', onClick)
+                .on('mouseenter', function() { $(this).css('backgroundColor', 'rgba(255,255,255,0.2)'); })
+                .on('mouseleave', function() { $(this).css('backgroundColor', 'rgba(255,255,255,0.1)'); })
+                .on('focus', function() { $(this).css({ outline: '2px solid rgba(255,255,255,0.7)', outlineOffset: '2px' }); })
+                .on('blur', function() { $(this).css({ outline: 'none', outlineOffset: '0' }); });
+            return $btn;
+        }
+
+        // Close button (X)
+        const $closeBtn = _navBtn('close', 'Close lightbox',
+            '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
+            function() { Lightbox.close(); });
+
+        // Previous button
+        _$prevBtn = _navBtn('prev', 'Previous image',
+            '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>',
+            function(e) { e.stopPropagation(); Lightbox._navigate(-1); });
+
+        // Next button
+        _$nextBtn = _navBtn('next', 'Next image',
+            '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>',
+            function(e) { e.stopPropagation(); Lightbox._navigate(1); });
+
+        // Image container (position-relative so download button aligns to image area)
+        const _$imgContainer = $('<div>')
+            .css({ position: 'relative', display: 'inline-block' });
+
+        // Image element (lazy-loaded — src set when showing)
+        _$img = $('<img>')
+            .addClass('ev-lightbox-img max-h-[90vh] select-none')
+            .css({ maxWidth: '90vw', objectFit: 'contain' })
+            .attr('draggable', 'false')
+            .attr('alt', '')
+            .on('load', function() {
+                // Fade in effect
+                $(this).css('opacity', '1');
+            });
+
+        _$imgContainer.append(_$img);
+
+        // Download button (top-right of image area, matches chat thumbnail style)
+        _$downloadBtn = $('<button>')
+            .addClass('w-9 h-9 rounded-md text-white cursor-pointer')
+            .css({
+                position: 'absolute',
+                top: '6px',
+                right: '6px',
+                zIndex: 20,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                opacity: 0,
+                transition: 'opacity 200ms ease',
+                backgroundColor: 'rgba(0,0,0,0.4)',
+                border: 'none',
+            })
+            .attr('title', 'Download image')
+            .attr('aria-label', 'Download image')
+            .attr('type', 'button')
+            .html('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>')
+            .on('click', async function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                const url = _images[_currentIndex];
+                try {
+                    const response = await fetch(url);
+                    const blob = await response.blob();
+                    const blobUrl = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = blobUrl;
+                    a.download = url.split('/').pop().split('?')[0] || 'image';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(blobUrl);
+                } catch (err) {
+                    window.open(url, '_blank');
+                }
+            });
+
+        _$imgContainer.append(_$downloadBtn);
+
+        // Hover on image container: show download button
+        _$imgContainer.on('mouseenter', function() { _$downloadBtn.css('opacity', 1); });
+        _$imgContainer.on('mouseleave', function() { _$downloadBtn.css('opacity', 0); });
+
+        // Download button hover: darker background
+        _$downloadBtn.on('mouseenter', function() { $(this).css('backgroundColor', 'rgba(0,0,0,0.6)'); });
+        _$downloadBtn.on('mouseleave', function() { $(this).css('backgroundColor', 'rgba(0,0,0,0.4)'); });
+
+        // Focus: show button with ring
+        _$downloadBtn.on('focus', function() {
+            $(this).css({ opacity: 1, outline: '2px solid rgba(255,255,255,0.7)', outlineOffset: '2px' });
+        });
+        _$downloadBtn.on('blur', function() {
+            $(this).css({ outline: 'none', outlineOffset: '0' });
+            if (!_$imgContainer.is(':hover')) _$downloadBtn.css('opacity', 0);
+        });
+
+        // Counter indicator — use inline CSS for fractional positioning & opacity
+        _$counter = $('<span>')
+            .addClass('ev-lightbox-counter text-sm font-mono backdrop-blur-sm px-3 py-1 rounded-full')
+            .css({
+                position: 'absolute',
+                bottom: '16px',
+                left: '50%',
+                transform: 'translateX(-50%)',
+                zIndex: 20,
+                color: 'rgba(255,255,255,0.8)',
+                backgroundColor: 'rgba(0,0,0,0.5)',
+                whiteSpace: 'nowrap',
+            });
+
+        // Hide counter if only 1 image
+        _$counter.attr('data-count', '0');
+
+        // Click on backdrop to close
+        _$overlay.on('click', function(e) {
+            if (e.target === _$overlay[0]) {
+                Lightbox.close();
+            }
+        });
+
+        // Prevent clicks on the image from closing
+        _$img.on('click', function(e) {
+            e.stopPropagation();
+        });
+
+        // Touch swipe support
+        _$overlay.on('touchstart', function(e) {
+            _touchStartX = e.originalEvent.touches[0].clientX;
+            _touchStartY = e.originalEvent.touches[0].clientY;
+        });
+
+        _$overlay.on('touchend', function(e) {
+            const touchEndX = e.originalEvent.changedTouches[0].clientX;
+            const touchEndY = e.originalEvent.changedTouches[0].clientY;
+            const diffX = _touchStartX - touchEndX;
+            const diffY = _touchStartY - touchEndY;
+
+            // Only swipe if horizontal movement dominates
+            if (Math.abs(diffX) > Math.abs(diffY) && Math.abs(diffX) > 50) {
+                Lightbox._navigate(diffX > 0 ? 1 : -1);
+            }
+        });
+
+        // Keyboard handler
+        _boundKeyHandler = function(e) {
+            if (!_isOpen) return;
+            switch (e.key) {
+                case 'Escape':
+                    e.preventDefault();
+                    Lightbox.close();
+                    break;
+                case 'ArrowLeft':
+                    e.preventDefault();
+                    Lightbox._navigate(-1);
+                    break;
+                case 'ArrowRight':
+                    e.preventDefault();
+                    Lightbox._navigate(1);
+                    break;
+                case 'Tab':
+                    e.preventDefault();
+                    _trapFocus(e.shiftKey);
+                    break;
+            }
+        };
+
+        // Focus trap: cycle between close, download, prev, next buttons
+        function _trapFocus(shiftKey) {
+            const focusable = [];
+            const $closeBtn = _$overlay.find('.ev-lightbox-close');
+            if ($closeBtn.length) focusable.push($closeBtn[0]);
+            if (_$downloadBtn && _$downloadBtn.length) focusable.push(_$downloadBtn[0]);
+            if (_images.length > 1) {
+                if (_$prevBtn && _$prevBtn.length) focusable.push(_$prevBtn[0]);
+                if (_$nextBtn && _$nextBtn.length) focusable.push(_$nextBtn[0]);
+            }
+            if (!focusable.length) return;
+            const currentIndex = focusable.indexOf(document.activeElement);
+            let nextIndex;
+            if (shiftKey) {
+                nextIndex = currentIndex <= 0 ? focusable.length - 1 : currentIndex - 1;
+            } else {
+                nextIndex = currentIndex >= focusable.length - 1 ? 0 : currentIndex + 1;
+            }
+            focusable[nextIndex].focus();
+        }
+
+        _$overlay.append($closeBtn, _$prevBtn, _$nextBtn, _$imgContainer, _$counter);
+        $('body').append(_$overlay);
+    }
+
+    function _showImage(index) {
+        _currentIndex = index;
+        _$img.css('opacity', '0');
+        // Lazy-load: set src only when the image becomes visible
+        _$img.attr('src', _images[index]);
+        _$counter.text((index + 1) + ' / ' + _images.length);
+    }
+
+    function _updateNavigation() {
+        if (_images.length <= 1) {
+            _$prevBtn.addClass('hidden');
+            _$nextBtn.addClass('hidden');
+            _$counter.addClass('hidden');
+        } else {
+            _$prevBtn.removeClass('hidden');
+            _$nextBtn.removeClass('hidden');
+            _$counter.removeClass('hidden');
+        }
+    }
+
+    // Public API
+    return {
+        
+        open: function(imageUrls, startIndex) {
+            _images = (imageUrls && imageUrls.length) ? imageUrls.slice() : [];
+            if (!_images.length) return;
+
+            _currentIndex = Math.max(0, Math.min(startIndex || 0, _images.length - 1));
+
+            // Save the currently focused element to restore on close
+            _prevFocusedEl = document.activeElement;
+
+            if (!_$overlay) {
+                _buildDOM();
+            }
+
+            $(document).on('keydown', _boundKeyHandler);
+
+            _showImage(_currentIndex);
+            _updateNavigation();
+            _$overlay.removeClass('hidden');
+            _isOpen = true;
+            document.body.style.overflow = 'hidden';
+
+            // Focus the close button first for accessibility
+            _$overlay.find('.ev-lightbox-close').focus();
+        },
+
+        
+        openFromImage: function(imgElement) {
+            const $clickedImg = $(imgElement);
+            const collected = _collectChatImages($clickedImg);
+            if (!collected) return;
+            Lightbox.open(collected.urls, collected.index);
+        },
+
+        
+        close: function() {
+            if (!_isOpen) return;
+            $(document).off('keydown', _boundKeyHandler);
+            _$overlay.addClass('hidden');
+            _isOpen = false;
+            document.body.style.overflow = '';
+            // Clear the src to stop any in-flight loads
+            _$img.attr('src', '');
+            _images = [];
+            // Restore focus to the previously focused element
+            if (_prevFocusedEl && typeof _prevFocusedEl.focus === 'function') {
+                try { _prevFocusedEl.focus(); } catch(e) {}
+            }
+            _prevFocusedEl = null;
+        },
+
+        
+        isOpen: function() {
+            return _isOpen;
+        },
+
+        
+        _navigate: function(direction) {
+            if (_images.length <= 1) return;
+            var newIndex = _currentIndex + direction;
+            if (newIndex < 0) newIndex = _images.length - 1;
+            if (newIndex >= _images.length) newIndex = 0;
+            _showImage(newIndex);
+        }
+    };
+})();
+
+// ── lazy-image.js ───────────────────────────────────────────────
+
+let _observer = null;
+let _observerRoot = null;
+
+function _findScrollContainer($img) {
+    const $c = $img.closest('#chat-messages, .chat-messages, [data-chat-container]');
+    return $c.length ? $c : $(document.body);
+}
+
+function _getObserver($scrollContainer) {
+    const root = $scrollContainer[0];
+    if (_observer && _observerRoot === root) return _observer;
+
+    // Dispose previous observer if container changed
+    if (_observer) {
+        _observer.disconnect();
+        _observer = null;
+        _observerRoot = null;
+    }
+
+    _observer = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+
+            const img = entry.target;
+            const $img = $(img);
+            const src = $img.attr('data-src');
+            if (!src) {
+                _observer.unobserve(img);
+                continue;
+            }
+
+            // Remove from observer — single-shot
+            _observer.unobserve(img);
+
+            // Set src to trigger load
+            $img.attr('src', src);
+
+            // Handle cached (already-loaded) images
+            if (img.complete) {
+                _onImageReady($img);
+            } else {
+                $img.one('load', function () { _onImageReady($(this)); });
+                $img.one('error', function () { _onImageError($(this)); });
+            }
+        }
+    }, {
+        root,
+        rootMargin: '300px',
+        threshold: 0,
+    });
+
+    _observerRoot = root;
+    return _observer;
+}
+
+function _onImageReady($img) {
+    const skeleton = $img[0]._lazySkeleton;
+    if (skeleton) {
+        $(skeleton).remove();
+        delete $img[0]._lazySkeleton;
+    }
+    $img.removeClass('chat-img-loading')
+        .css({ opacity: '1', transition: 'opacity 0.35s ease' });
+}
+
+function _onImageError($img) {
+    const skeleton = $img[0]._lazySkeleton;
+    if (skeleton) {
+        $(skeleton).remove();
+        delete $img[0]._lazySkeleton;
+    }
+    $img.removeClass('chat-img-loading')
+        .css({ opacity: '1' });
+}
+
+function setupImageForLazy($img, $scrollContainer) {
+    if (!$img.length) return;
+    const imageUrl = $img.attr('data-src');
+    if (!imageUrl) return;
+
+    if (!$scrollContainer) $scrollContainer = _findScrollContainer($img);
+
+    // Ensure the image is hidden until loaded
+    $img.addClass('chat-img-loading').css('opacity', '0');
+
+    // Build skeleton — use image's computed max dimensions as skeleton size
+    const $wrapper = $img.parent();
+    const skeleton = $('<div>')
+        .addClass('chat-img-skeleton')
+        .css({
+            width: $img.css('max-width') || '400px',
+            height: $img.css('max-height') || '300px',
+        });
+
+    // Insert skeleton as first child of the wrapper so the download button
+    // (appended later by _wrapImageWithDownload) still renders on top.
+    $wrapper.prepend(skeleton);
+
+    // Stash skeleton reference on the DOM element for cleanup
+    $img[0]._lazySkeleton = skeleton[0];
+
+    const observer = _getObserver($scrollContainer);
+    observer.observe($img[0]);
+}
+
+function initLazyImages($scrollContainer, $scope) {
+    const $root = $scope || $scrollContainer;
+    if (!$scrollContainer) $scrollContainer = _findScrollContainer($root);
+    $root.find('img[data-src]').each(function () {
+        // Skip if already being observed or already loaded
+        if (this._lazyObserved) return;
+        this._lazyObserved = true;
+        setupImageForLazy($(this), $scrollContainer);
+    });
+}
+
+function createLazyImage(imageUrl) {
+    return $('<img>')
+        .attr('data-src', imageUrl)
+        .attr('alt', 'Attached image');
+}
+
+function disposeLazyObserver() {
+    if (_observer) {
+        _observer.disconnect();
+        _observer = null;
+        _observerRoot = null;
+    }
+}
+
+function retrofitImageForLazy($img, $scrollContainer) {
+    const src = $img.attr('src');
+    if (!src || src.startsWith('data:')) return;
+    $img.removeAttr('src').attr('data-src', src);
+    setupImageForLazy($img, $scrollContainer || _findScrollContainer($img));
+}
+
 // ── renderers.js ────────────────────────────────────────────────
 
 // ── Sanitizer ─────────────────────────────────────────────────────────────────
@@ -75,7 +583,7 @@ const ALLOWED_ATTRS = {
     a:    ['href', 'title', 'target'],
     code: ['class'],
     pre:  ['class'],
-    img:  ['src', 'alt', 'class'],
+    img:  ['src', 'alt', 'class', 'loading'],
 };
 
 function _walkSanitize(node) {
@@ -547,6 +1055,104 @@ function _buildSysBalloon(tag, content, tagColorClass, fullColorClass, truncateL
     return $balloon;
 }
 
+function _wrapImageWithDownload($img) {
+    const imageUrl = $img.attr('src') || $img.attr('data-src');
+    if (!imageUrl) return;
+    // Lazy-load images to prevent flooding HTTP connections on page with many images
+    $img.attr('loading', 'lazy');
+    // Thumbnail styling: constrained size via inline CSS (Tailwind compiled CSS
+    // may not include arbitrary-value classes like max-w-[85vw]).
+    $img.addClass('rounded-lg')
+        .css({
+            'max-width': '400px',
+            'max-height': '300px',
+            'object-fit': 'contain',
+            'cursor': 'pointer',
+            'display': 'block',
+        });
+    // Responsive: on mobile (<768px) use viewport-relative width
+    const _applyResponsiveWidth = function() {
+        $img.css('max-width', window.innerWidth < 768 ? '85vw' : '400px');
+    };
+    _applyResponsiveWidth();
+    $(window).on('resize.chatThumb', $.debounce ? undefined : _applyResponsiveWidth);
+    // Simple debounced resize handler
+    let _resizeTimer;
+    $(window).on('resize.chatThumb', function() {
+        clearTimeout(_resizeTimer);
+        _resizeTimer = setTimeout(_applyResponsiveWidth, 150);
+    });
+
+    const $container = $('<div>').css({
+        position: 'relative',
+        display: 'inline-block',
+        borderRadius: '0.5rem',
+        overflow: 'hidden',
+    });
+    $img.wrap($container);
+    const $wrapper = $img.parent();
+
+    // Lightbox click on the wrapper (image area)
+    $wrapper.on('click', function(e) {
+        // Don't open lightbox if download button was clicked
+        if ($(e.target).closest('button').length) return;
+        Lightbox.openFromImage($img[0]);
+    });
+
+    const $btn = $('<button>')
+        .addClass('w-9 h-9 rounded-md text-white cursor-pointer')
+        .css({
+            position: 'absolute',
+            top: '6px',
+            right: '6px',
+            zIndex: 10,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            opacity: 0,
+            transition: 'opacity 200ms ease',
+            backgroundColor: 'rgba(0,0,0,0.4)',
+            border: 'none',
+        })
+        .attr('title', 'Download image')
+        .attr('aria-label', 'Download image')
+        .html('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>')
+        .on('click', async function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            try {
+                const response = await fetch(imageUrl);
+                const blob = await response.blob();
+                const blobUrl = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = blobUrl;
+                a.download = imageUrl.split('/').pop().split('?')[0] || 'image';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(blobUrl);
+            } catch (err) {
+                window.open(imageUrl, '_blank');
+            }
+        });
+    $wrapper.append($btn);
+
+    // Hover: show button
+    $wrapper.on('mouseenter', function() { $btn.css('opacity', 1); });
+    $wrapper.on('mouseleave', function() { $btn.css('opacity', 0); });
+    // Button hover: darker background
+    $btn.on('mouseenter', function() { $(this).css('backgroundColor', 'rgba(0,0,0,0.6)'); });
+    $btn.on('mouseleave', function() { $(this).css('backgroundColor', 'rgba(0,0,0,0.4)'); });
+    // Focus: show button with ring
+    $btn.on('focus', function() {
+        $(this).css({ opacity: 1, outline: '2px solid rgba(255,255,255,0.7)', outlineOffset: '2px' });
+    });
+    $btn.on('blur', function() {
+        $(this).css({ outline: 'none', outlineOffset: '0' });
+        if (!$wrapper.is(':hover')) $btn.css('opacity', 0);
+    });
+}
+
 function buildMessageBubble(role, content, opts = {}, cfg = {}) {
     const {
         userAlign = 'right',
@@ -558,6 +1164,8 @@ function buildMessageBubble(role, content, opts = {}, cfg = {}) {
         formatTimestamp = null,
     } = cfg;
 
+    const meta        = opts.metadata || {};
+    const isSlashCmd  = !!meta.slash_command;
     const isUser      = role === 'user';
     const isError     = role === 'error';
     const isSystem    = !isUser && !isError && role !== 'assistant' && /^\[system/i.test(content);
@@ -600,10 +1208,10 @@ function buildMessageBubble(role, content, opts = {}, cfg = {}) {
         // Render image attachment if present
         const meta = opts.metadata || {};
         if (meta.image_url) {
-            const $img = $('<img>').attr('src', meta.image_url)
-                .addClass('max-w-[240px] max-h-[240px] rounded-lg mb-1 cursor-pointer')
-                .on('click', function() { window.open(meta.image_url, '_blank'); });
+            const $img = createLazyImage(meta.image_url);
             $bubble.append($img);
+            _wrapImageWithDownload($img);
+            setupImageForLazy($img);
         }
         // Render non-image file badge
         if (meta.attachment_info && !meta.attachment_info.is_image) {
@@ -626,14 +1234,32 @@ function buildMessageBubble(role, content, opts = {}, cfg = {}) {
         $bubble = $('<div class="bg-orange-200 text-gray-600 border-gray-400 rounded-2xl px-4 py-2.5 text-sm break-words">');
         $bubble.append(_buildSysBalloon(sysTag, sysContent, 'text-gray-500', 'text-gray-400', 120));
 
+    } else if (isSlashCmd) {
+        // Slash command response — blue styling, visible to user only (not sent to LLM)
+        const rendered = typeof marked !== 'undefined'
+            ? sanitize(marked.parse((content || '').replace(/[\u201c\u201d\u00ab\u00bb]/g, '"'))).replace(/<table/g, '<div class="table-wrapper"><table').replace(/<\/table>/g, '</table></div>')
+            : escape(content);
+        $bubble = $('<div class="chat-prose rounded-2xl px-4 py-2.5 text-sm break-words text-blue-800 border border-blue-200 dark:bg-blue-950 dark:text-blue-200 dark:border-blue-800">');
+        $bubble.attr('role', 'article');
+        $bubble.html(rendered);
+        $bubble.find('img').each(function() {
+            const $img = $(this);
+            _wrapImageWithDownload($img);
+            retrofitImageForLazy($img);
+        });
     } else {
         // assistant: markdown with sanitizer
         const rendered = typeof marked !== 'undefined'
-            ? sanitize(marked.parse(content || '')).replace(/<table/g, '<div class="table-wrapper"><table').replace(/<\/table>/g, '</table></div>')
+            ? sanitize(marked.parse((content || '').replace(/[\u201c\u201d\u00ab\u00bb]/g, '"'))).replace(/<table/g, '<div class="table-wrapper"><table').replace(/<\/table>/g, '</table></div>')
             : escape(content);
         $bubble = $('<div class="chat-prose rounded-2xl px-4 py-2.5 border-gray-300 text-sm break-words">').addClass(assistantBubbleClass);
         $bubble.attr('role', 'article');
         $bubble.html(rendered);
+        $bubble.find('img').each(function() {
+            const $img = $(this);
+            _wrapImageWithDownload($img);
+            retrofitImageForLazy($img);
+        });
     }
 
     const $inner = $('<div class="max-w-[80%] min-w-0">').append($bubble);
@@ -697,6 +1323,7 @@ class SSEAdapter {
         this._log = log('sse');
         this._lastEventAt = 0;
         this._livenessInterval = null;
+        this._usingUnified = false; // true when using unified /api/realtime/stream
     }
 
     start(handler) {
@@ -718,6 +1345,20 @@ class SSEAdapter {
     }
 
     _connect(url) {
+        // Rewrite legacy chat stream URLs to unified realtime endpoint
+        if (url.indexOf('/api/agents/') !== -1 && url.indexOf('/chat/stream') !== -1) {
+            const u = new URL(url, window.location.origin);
+            const agentId = this._agentId || (url.match(/\/agents\/([^/?]+)\//) || [])[1] || '';
+            const sessionId = this._sessionId || u.searchParams.get('session_id') || '';
+            const after = this._lastSeq;
+            let newUrl = '/api/realtime/stream?chat=1';
+            if (agentId) newUrl += '&agent_id=' + encodeURIComponent(agentId);
+            if (sessionId) newUrl += '&session_id=' + encodeURIComponent(sessionId);
+            if (after > 0) newUrl += '&after=' + after;
+            this._usingUnified = true;
+            url = newUrl;
+        }
+
         this._log.info('open', url);
         const es = new EventSource(url);
         this._es = es;
@@ -732,9 +1373,19 @@ class SSEAdapter {
                 this._log.warn('liveness timeout — no event for', elapsed, 'ms, forcing reconnect');
                 console.warn('[sse] liveness timeout, elapsed=', elapsed, '_lastSeq=', this._lastSeq);
                 if (this._es) { this._es.close(); this._es = null; }
-                const u = new URL(url, window.location.origin);
-                if (this._lastSeq > 0) u.searchParams.set('after', this._lastSeq);
-                const resumeUrl = u.pathname + u.search;
+                let resumeUrl;
+                if (this._usingUnified) {
+                    const agentId = this._agentId || '';
+                    const sessionId = this._sessionId || '';
+                    resumeUrl = '/api/realtime/stream?chat=1';
+                    if (agentId) resumeUrl += '&agent_id=' + encodeURIComponent(agentId);
+                    if (sessionId) resumeUrl += '&session_id=' + encodeURIComponent(sessionId);
+                    if (this._lastSeq > 0) resumeUrl += '&after=' + this._lastSeq;
+                } else {
+                    const u = new URL(url, window.location.origin);
+                    if (this._lastSeq > 0) u.searchParams.set('after', this._lastSeq);
+                    resumeUrl = u.pathname + u.search;
+                }
                 this._connect(resumeUrl);
             }
         }, LIVENESS_TIMEOUT_MS);
@@ -763,9 +1414,19 @@ class SSEAdapter {
             setTimeout(() => {
                 if (this._intentionallyStopped) return;
                 if (this._es) return; // another stream already started
-                const u = new URL(url, window.location.origin);
-                if (this._lastSeq > 0) u.searchParams.set('after', this._lastSeq);
-                const resumeUrl = u.pathname + u.search;
+                let resumeUrl;
+                if (this._usingUnified) {
+                    const agentId = this._agentId || '';
+                    const sessionId = this._sessionId || '';
+                    resumeUrl = '/api/realtime/stream?chat=1';
+                    if (agentId) resumeUrl += '&agent_id=' + encodeURIComponent(agentId);
+                    if (sessionId) resumeUrl += '&session_id=' + encodeURIComponent(sessionId);
+                    if (this._lastSeq > 0) resumeUrl += '&after=' + this._lastSeq;
+                } else {
+                    const u = new URL(url, window.location.origin);
+                    if (this._lastSeq > 0) u.searchParams.set('after', this._lastSeq);
+                    resumeUrl = u.pathname + u.search;
+                }
                 this._log.info('reconnecting from seq', this._lastSeq, resumeUrl);
                 console.warn('[sse] reconnecting _lastSeq=', this._lastSeq, '_fillingGap=', this._fillingGap, '_pendingQueue=', this._pendingQueue.length, 'url=', resumeUrl);
                 this._connect(resumeUrl);
@@ -1810,7 +2471,8 @@ class ChatUI {
                 continue;
             }
             if (entry.type === 'system') {
-                this.appendMessage('system', entry.content || '');
+                const sysMeta = (entry.metadata && entry.metadata.slash_command) ? { metadata: { slash_command: true } } : {};
+                this.appendMessage('system', entry.content || '', sysMeta);
                 continue;
             }
         }
@@ -2139,6 +2801,7 @@ window.ChatUI = ChatUI;
 window.SSEAdapter = SSEAdapter;
 window.PollingAdapter = PollingAdapter;
 window.ReplayAdapter = ReplayAdapter;
+window.Lightbox = Lightbox;
 
 log('ui').info('chat-ui v2 loaded');
 

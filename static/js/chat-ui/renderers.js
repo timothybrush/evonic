@@ -6,6 +6,9 @@
  * Markdown output goes through sanitize() before being set via .html().
  */
 
+import { Lightbox } from './lightbox.js';
+import { setupImageForLazy, createLazyImage, retrofitImageForLazy } from './lazy-image.js';
+
 // ── Sanitizer ─────────────────────────────────────────────────────────────────
 
 const ALLOWED_TAGS = new Set([
@@ -17,7 +20,7 @@ const ALLOWED_ATTRS = {
     a:    ['href', 'title', 'target'],
     code: ['class'],
     pre:  ['class'],
-    img:  ['src', 'alt', 'class'],
+    img:  ['src', 'alt', 'class', 'loading'],
 };
 
 function _walkSanitize(node) {
@@ -503,6 +506,104 @@ function _buildSysBalloon(tag, content, tagColorClass, fullColorClass, truncateL
  * Build a message bubble jQuery element.
  * @returns {jQuery}  the wrapper div with data-msg-role
  */
+function _wrapImageWithDownload($img) {
+    const imageUrl = $img.attr('src') || $img.attr('data-src');
+    if (!imageUrl) return;
+    // Lazy-load images to prevent flooding HTTP connections on page with many images
+    $img.attr('loading', 'lazy');
+    // Thumbnail styling: constrained size via inline CSS (Tailwind compiled CSS
+    // may not include arbitrary-value classes like max-w-[85vw]).
+    $img.addClass('rounded-lg')
+        .css({
+            'max-width': '400px',
+            'max-height': '300px',
+            'object-fit': 'contain',
+            'cursor': 'pointer',
+            'display': 'block',
+        });
+    // Responsive: on mobile (<768px) use viewport-relative width
+    const _applyResponsiveWidth = function() {
+        $img.css('max-width', window.innerWidth < 768 ? '85vw' : '400px');
+    };
+    _applyResponsiveWidth();
+    $(window).on('resize.chatThumb', $.debounce ? undefined : _applyResponsiveWidth);
+    // Simple debounced resize handler
+    let _resizeTimer;
+    $(window).on('resize.chatThumb', function() {
+        clearTimeout(_resizeTimer);
+        _resizeTimer = setTimeout(_applyResponsiveWidth, 150);
+    });
+
+    const $container = $('<div>').css({
+        position: 'relative',
+        display: 'inline-block',
+        borderRadius: '0.5rem',
+        overflow: 'hidden',
+    });
+    $img.wrap($container);
+    const $wrapper = $img.parent();
+
+    // Lightbox click on the wrapper (image area)
+    $wrapper.on('click', function(e) {
+        // Don't open lightbox if download button was clicked
+        if ($(e.target).closest('button').length) return;
+        Lightbox.openFromImage($img[0]);
+    });
+
+    const $btn = $('<button>')
+        .addClass('w-9 h-9 rounded-md text-white cursor-pointer')
+        .css({
+            position: 'absolute',
+            top: '6px',
+            right: '6px',
+            zIndex: 10,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            opacity: 0,
+            transition: 'opacity 200ms ease',
+            backgroundColor: 'rgba(0,0,0,0.4)',
+            border: 'none',
+        })
+        .attr('title', 'Download image')
+        .attr('aria-label', 'Download image')
+        .html('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>')
+        .on('click', async function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            try {
+                const response = await fetch(imageUrl);
+                const blob = await response.blob();
+                const blobUrl = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = blobUrl;
+                a.download = imageUrl.split('/').pop().split('?')[0] || 'image';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(blobUrl);
+            } catch (err) {
+                window.open(imageUrl, '_blank');
+            }
+        });
+    $wrapper.append($btn);
+
+    // Hover: show button
+    $wrapper.on('mouseenter', function() { $btn.css('opacity', 1); });
+    $wrapper.on('mouseleave', function() { $btn.css('opacity', 0); });
+    // Button hover: darker background
+    $btn.on('mouseenter', function() { $(this).css('backgroundColor', 'rgba(0,0,0,0.6)'); });
+    $btn.on('mouseleave', function() { $(this).css('backgroundColor', 'rgba(0,0,0,0.4)'); });
+    // Focus: show button with ring
+    $btn.on('focus', function() {
+        $(this).css({ opacity: 1, outline: '2px solid rgba(255,255,255,0.7)', outlineOffset: '2px' });
+    });
+    $btn.on('blur', function() {
+        $(this).css({ outline: 'none', outlineOffset: '0' });
+        if (!$wrapper.is(':hover')) $btn.css('opacity', 0);
+    });
+}
+
 export function buildMessageBubble(role, content, opts = {}, cfg = {}) {
     const {
         userAlign = 'right',
@@ -558,10 +659,10 @@ export function buildMessageBubble(role, content, opts = {}, cfg = {}) {
         // Render image attachment if present
         const meta = opts.metadata || {};
         if (meta.image_url) {
-            const $img = $('<img>').attr('src', meta.image_url)
-                .addClass('max-w-[240px] max-h-[240px] rounded-lg mb-1 cursor-pointer')
-                .on('click', function() { window.open(meta.image_url, '_blank'); });
+            const $img = createLazyImage(meta.image_url);
             $bubble.append($img);
+            _wrapImageWithDownload($img);
+            setupImageForLazy($img);
         }
         // Render non-image file badge
         if (meta.attachment_info && !meta.attachment_info.is_image) {
@@ -587,19 +688,29 @@ export function buildMessageBubble(role, content, opts = {}, cfg = {}) {
     } else if (isSlashCmd) {
         // Slash command response — blue styling, visible to user only (not sent to LLM)
         const rendered = typeof marked !== 'undefined'
-            ? sanitize(marked.parse(content || '')).replace(/<table/g, '<div class="table-wrapper"><table').replace(/<\/table>/g, '</table></div>')
+            ? sanitize(marked.parse((content || '').replace(/[\u201c\u201d\u00ab\u00bb]/g, '"'))).replace(/<table/g, '<div class="table-wrapper"><table').replace(/<\/table>/g, '</table></div>')
             : escape(content);
-        $bubble = $('<div class="chat-prose rounded-2xl px-4 py-2.5 text-sm break-words bg-blue-50 text-blue-800 border border-blue-200 dark:bg-blue-950 dark:text-blue-200 dark:border-blue-800">');
+        $bubble = $('<div class="chat-prose rounded-2xl px-4 py-2.5 text-sm break-words text-blue-800 border border-blue-200 dark:bg-blue-950 dark:text-blue-200 dark:border-blue-800">');
         $bubble.attr('role', 'article');
         $bubble.html(rendered);
+        $bubble.find('img').each(function() {
+            const $img = $(this);
+            _wrapImageWithDownload($img);
+            retrofitImageForLazy($img);
+        });
     } else {
         // assistant: markdown with sanitizer
         const rendered = typeof marked !== 'undefined'
-            ? sanitize(marked.parse(content || '')).replace(/<table/g, '<div class="table-wrapper"><table').replace(/<\/table>/g, '</table></div>')
+            ? sanitize(marked.parse((content || '').replace(/[\u201c\u201d\u00ab\u00bb]/g, '"'))).replace(/<table/g, '<div class="table-wrapper"><table').replace(/<\/table>/g, '</table></div>')
             : escape(content);
         $bubble = $('<div class="chat-prose rounded-2xl px-4 py-2.5 border-gray-300 text-sm break-words">').addClass(assistantBubbleClass);
         $bubble.attr('role', 'article');
         $bubble.html(rendered);
+        $bubble.find('img').each(function() {
+            const $img = $(this);
+            _wrapImageWithDownload($img);
+            retrofitImageForLazy($img);
+        });
     }
 
     const $inner = $('<div class="max-w-[80%] min-w-0">').append($bubble);
