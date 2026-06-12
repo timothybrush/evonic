@@ -262,6 +262,26 @@ def api_create_agent():
         if not os.path.isfile(_notes_md):
             with open(_notes_md, 'w', encoding='utf-8') as _f:
                 _f.write(_NOTES_MD_TEMPLATE)
+
+        # Copy default knowledge base files from defaults/ directory
+        import shutil as _shutil
+        _defaults_dir = os.path.join(BASE_DIR, 'defaults')
+
+        # evonic.md (from super_agent_kb_evonic.md)
+        _src = os.path.join(_defaults_dir, 'super_agent_kb_evonic.md')
+        if os.path.isfile(_src):
+            _shutil.copy2(_src, os.path.join(_kb_dir(agent_id), 'evonic.md'))
+
+        # reminder-and-schedule-creation-rules.md (scheduler/reminder guide)
+        _src = os.path.join(_defaults_dir, 'reminder-and-schedule-creation-rules.md')
+        if os.path.isfile(_src):
+            _shutil.copy2(_src, os.path.join(_kb_dir(agent_id), 'reminder-and-schedule-creation-rules.md'))
+
+        # evonet.md (Evonet connector reference)
+        _src = os.path.join(_defaults_dir, 'evonet.md')
+        if os.path.isfile(_src):
+            _shutil.copy2(_src, os.path.join(_kb_dir(agent_id), 'evonet.md'))
+
         agent = db.get_agent(agent_id)
         agent['system_prompt'] = _read_system_prompt(agent_id, fallback=agent.get('system_prompt', ''))
         return jsonify({'success': True, 'agent': _sanitize_agent(agent)})
@@ -1257,17 +1277,21 @@ def api_chat_poll(agent_id):
     return jsonify({'messages': filtered})
 
 
-@agents_bp.route('/api/agents/<agent_id>/chat/summary', methods=['GET'])
-def api_chat_summary(agent_id):
-    user_id = request.args.get('user_id', 'anonymous')
+def _chat_summary_payload(agent_id: str, user_id: str) -> dict:
     session_id = db.get_session_id(agent_id, user_id) or db.get_or_create_session(agent_id, user_id)
     summary = db.get_summary(session_id, agent_id=agent_id)
     if summary:
-        return jsonify({'summary': summary['summary'],
-                        'last_message_id': summary['last_message_id'],
-                        'message_count': summary['message_count'],
-                        'updated_at': summary.get('updated_at')})
-    return jsonify({'summary': None})
+        return {'summary': summary['summary'],
+                'last_message_id': summary['last_message_id'],
+                'message_count': summary['message_count'],
+                'updated_at': summary.get('updated_at')}
+    return {'summary': None}
+
+
+@agents_bp.route('/api/agents/<agent_id>/chat/summary', methods=['GET'])
+def api_chat_summary(agent_id):
+    user_id = request.args.get('user_id', 'anonymous')
+    return jsonify(_chat_summary_payload(agent_id, user_id))
 
 
 @agents_bp.route('/api/agents/<agent_id>/chat/state', methods=['GET'])
@@ -1358,7 +1382,7 @@ def api_chat_agent_state(agent_id):
                     'is_fallback': False,
                     'id': prim_model.get('id', ''),
                 }
-        return jsonify({
+        payload = {
             'mode': state.mode,
             'tasks': state.tasks,
             'plan_file': state.plan_file,
@@ -1367,8 +1391,16 @@ def api_chat_agent_state(agent_id):
             'focus_reason': state.focus_reason,
             'active_model': active_model,
             'loaded_skills': loaded_skills,
-        })
-    return jsonify({'mode': None, 'active_model': None, 'loaded_skills': loaded_skills})
+        }
+    else:
+        payload = {'mode': None, 'active_model': None, 'loaded_skills': loaded_skills}
+
+    # ?include=summary piggybacks the session summary on this response so the
+    # UI gets state + summary in one round trip instead of two requests.
+    if request.args.get('include') == 'summary':
+        payload['summary'] = _chat_summary_payload(
+            agent_id, request.args.get('user_id', 'anonymous'))
+    return jsonify(payload)
 
 
 @agents_bp.route('/api/agents/<agent_id>/skills/<skill_id>/unload', methods=['POST'])

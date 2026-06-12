@@ -301,6 +301,11 @@ def start_server(port=None, host=None, debug=None, daemon=False):
             os.execv(release_py, [release_py, release_app])
             # execv replaces the process; lines below unreachable.
 
+    # We already hold the single-instance flock (acquired above via
+    # _acquire_pid_lock). app.py runs in THIS same process, so tell its
+    # module-level guard to skip re-acquiring the lock — a second flock on the
+    # same file from the same process would self-conflict and abort startup.
+    os.environ["EVONIC_PID_LOCK_HELD"] = "1"
     try:
         from app import app
     except ModuleNotFoundError as e:
@@ -3723,6 +3728,95 @@ def doctor_command(quick=False, fix=False):
 
     except Exception as e:
         results.append(_fail(f"Artifact tool check failed: {e}"))
+
+    # ── 10. Non-Lazy Skill Tool Consistency Check ─────────────────────────────
+    _section("10. Non-Lazy Skill Tool Consistency Check")
+
+    try:
+        from models.db import db
+        from backend.skills_manager import SkillsManager
+
+        agents = db.get_agents()
+        sm = SkillsManager()
+        any_issues = False
+
+        for a in agents:
+            aid = a.get("id", "?")
+            aname = a.get("name", aid)
+            agent_skills = db.get_agent_skills(aid)
+
+            if not agent_skills:
+                continue
+
+            agent_tools = set(db.get_agent_tools(aid))
+
+            for skill_id in agent_skills:
+                # Check if skill directory exists (stale skill ID)
+                skill_dir = os.path.join(ROOT, "skills", skill_id)
+                if not os.path.isdir(skill_dir):
+                    continue
+
+                # Load manifest
+                manifest_path = os.path.join(skill_dir, "skill.json")
+                try:
+                    with open(manifest_path) as f:
+                        manifest = json.load(f)
+                except (json.JSONDecodeError, IOError):
+                    results.append(_warn(
+                        f"Skill '{skill_id}' manifest is corrupted, skipping tool check"
+                    ))
+                    continue
+
+                # Skip lazy skills (tools injected on-demand via use_skill())
+                if manifest.get("lazy_tools"):
+                    continue
+
+                # Skip disabled skills
+                if not sm.is_skill_enabled(skill_id):
+                    continue
+
+                # Get expected tool defs
+                tool_defs = sm.get_skill_tool_defs(skill_id)
+                if not tool_defs:
+                    continue
+
+                # Build expected tool IDs: skill:<skill_id>:<fn_name>
+                expected_tools = set()
+                for td in tool_defs:
+                    fn_name = td.get("function", {}).get("name", "")
+                    if fn_name:
+                        expected_tools.add(f"skill:{skill_id}:{fn_name}")
+
+                # Find missing tool assignments
+                missing = expected_tools - agent_tools
+
+                if missing:
+                    any_issues = True
+                    missing_list = sorted(missing)
+                    missing_preview = ", ".join(missing_list)
+                    results.append(_warn(
+                        f"Agent '{aname}' ({aid}) has non-lazy skill '{skill_id}' assigned but\n"
+                        f"    missing {len(missing_list)} tool(s): {missing_preview}"
+                    ))
+
+                    if fix:
+                        for tool_id in missing_list:
+                            try:
+                                db.add_agent_tool(aid, tool_id)
+                                fixes_applied.append(
+                                    f"Added tool '{tool_id}' to agent '{aname}' ({aid})"
+                                )
+                            except Exception as e:
+                                results.append(_fail(
+                                    f"Failed to add tool '{tool_id}' to agent '{aid}': {e}"
+                                ))
+
+        if not any_issues:
+            results.append(_ok("All non-lazy skill tools are correctly assigned"))
+
+    except Exception as e:
+        results.append(_fail(f"Non-lazy skill tool check failed: {e}"))
+
 
     # ── Summary ───────────────────────────────────────────────
     _section("Summary")
