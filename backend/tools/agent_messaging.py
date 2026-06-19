@@ -126,6 +126,10 @@ _TOOL_DEFS = [
                     "session": {
                         "type": "string",
                         "description": "The target session ID to send the message to. If omitted, defaults to the agent's inter-agent session (__agent__<sender-id>)."
+                    },
+                    "injected_system_vars": {
+                        "type": "object",
+                        "description": "Optional flat key\u2192value pairs. Keys matching {{key}} placeholders in the target agent's SYSTEM.md will be replaced with the corresponding value for this session turn only. Keys must match [a-zA-Z_][a-zA-Z0-9_]*. Max 10 keys per call, max 1024 chars per value. Reserved keys (time, date, day) are rejected."
                     }
                 },
                 "required": ["target_agent_id", "message"]
@@ -190,6 +194,35 @@ def _exec_send_agent_message(args: dict, agent_context: dict) -> dict:
     sender_name = agent_context.get('name', sender_id)
     target_id = args.get('target_agent_id', '').strip().lower()
     message = args.get('message', '').strip()
+
+    # ---- injected_system_vars validation ----
+    _INJECTED_VARS_RESERVED = frozenset({'time', 'date', 'day'})
+    _INJECTED_VARS_KEY_RE = _re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+    injected_system_vars = args.get('injected_system_vars')
+    sanitized_vars = None
+    if injected_system_vars is not None:
+        if not isinstance(injected_system_vars, dict):
+            return {'error': 'injected_system_vars must be a flat key->value object.'}
+        if len(injected_system_vars) > 10:
+            return {'error': 'injected_system_vars: maximum 10 keys allowed.'}
+        sanitized = {}
+        seen = set()
+        for raw_key, raw_value in injected_system_vars.items():
+            key = str(raw_key).strip()
+            value = str(raw_value).strip()
+            if not _INJECTED_VARS_KEY_RE.match(key):
+                return {'error': f'injected_system_vars: invalid key "{key}". Keys must match [a-zA-Z_][a-zA-Z0-9_]*.'}
+            if key.lower() in _INJECTED_VARS_RESERVED:
+                return {'error': f'injected_system_vars: key "{key}" is reserved and cannot be overridden.'}
+            key_lower = key.lower()
+            if key_lower in seen:
+                return {'error': f'injected_system_vars: duplicate key "{key}" (case-insensitive).'}
+            seen.add(key_lower)
+            if len(value) > 1024:
+                return {'error': f'injected_system_vars: value for key "{key}" exceeds 1024 characters.'}
+            sanitized[key] = value
+        if sanitized:
+            sanitized_vars = sanitized
 
     if not target_id:
         return {'error': 'target_agent_id is required.'}
@@ -346,6 +379,7 @@ def _exec_send_agent_message(args: dict, agent_context: dict) -> dict:
     metadata = {
         'agent_message': True,
         'from_agent_id': sender_id,
+        'injected_system_vars': sanitized_vars,
         'from_agent_name': sender_name,
         'agent_message_depth': current_depth + 1,
         'reply_to_id': reply_to_id,
@@ -535,6 +569,7 @@ def _on_final_answer(data: dict) -> None:
     report_to_id = None
     report_to_channel_id = None
     original_depth = 0
+    subagent_user_direct = False
     for msg in reversed(messages):
         meta = msg.get('metadata') or {}
         if isinstance(meta, str):
@@ -547,6 +582,7 @@ def _on_final_answer(data: dict) -> None:
             report_to_id = meta.get('report_to_id')
             report_to_channel_id = meta.get('report_to_channel_id') or None
             original_depth = meta.get('agent_message_depth', 0)
+            subagent_user_direct = meta.get('subagent_user_direct', False)
             break
 
     if not report_to_id:
@@ -569,6 +605,7 @@ def _on_final_answer(data: dict) -> None:
             report_to_id = latest_meta.get('report_to_id')
             report_to_channel_id = latest_meta.get('report_to_channel_id') or None
             original_depth = latest_meta.get('agent_message_depth', 0)
+            subagent_user_direct = latest_meta.get('subagent_user_direct', False)
 
     if not report_to_id:
         _logger.warning(
@@ -597,6 +634,10 @@ def _on_final_answer(data: dict) -> None:
     # Forward B's reply to A's user session
     agent_b = db.get_agent(agent_b_id)
     agent_b_name = agent_b.get('name', agent_b_id) if agent_b else agent_b_id
+
+    # Prepend direct-sub-agent marker if this sub-agent was spawned via /sub command
+    if subagent_user_direct:
+        answer = "[Sub-agent response \u2014 spawned directly by user via /sub command]\n\n" + answer
 
     # Append a hint so Agent A knows it can continue the conversation if needed
     forwarded_message = (

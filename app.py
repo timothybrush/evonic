@@ -121,11 +121,17 @@ app.jinja_loader = ChoiceLoader([
 sock = Sock(app)
 app.secret_key = config.SECRET_KEY
 
+# Auto-reload templates on every request so plugin template changes are
+# visible immediately without a server restart (especially useful during
+# plugin development where templates are in non-standard directories).
+app.config['TEMPLATES_AUTO_RELOAD'] = True
+
 # Make session permanent so it survives mobile browser backgrounding / restarts
 from datetime import timedelta
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SECURE'] = config.SESSION_COOKIE_SECURE
 
 # Global upload size limit (defense-in-depth for all endpoints)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB
@@ -139,6 +145,81 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 from flask_compress import Compress
 app.config['COMPRESS_STREAMS'] = False
 Compress(app)
+
+# ---------------------------------------------------------------------------
+# API Rate Limiting (FINDING-004) — tiered, SQLite-backed
+# ---------------------------------------------------------------------------
+from models.api_rate_limit import (
+    classify_request, check_rate_limit, TIERS,
+    sse_register as _sse_register,
+    sse_unregister as _sse_unregister,
+    SSE_MAX_CONCURRENT as _SSE_MAX,
+)
+from flask import g as _g
+
+# Skip rate limiting for these paths (login already has its own rate limiter)
+_RATELIMIT_SKIP_PREFIXES = ('/login', '/logout')
+
+@app.before_request
+def _api_rate_limit_before():
+    """Check rate limit before processing the request."""
+    # Skip login/logout — already rate-limited in auth.py
+    path = request.path
+    if path.startswith(_RATELIMIT_SKIP_PREFIXES):
+        return None
+
+    # Classify the request into a tier
+    tier = classify_request(path, request.method)
+    if tier is None:
+        return None  # no rate limit for this path
+
+    # Build identifier: user ID if authenticated, else IP
+    if session.get('authenticated'):
+        identifier = f"user:{session.get('_user_id', 'admin')}"
+    else:
+        identifier = f"ip:{request.remote_addr or '0.0.0.0'}"
+
+    # Check rate limit
+    allowed, remaining, limit, retry_after = check_rate_limit(identifier, tier)
+
+    # Store rate limit info on g for after_request
+    _g._rate_limit_info = {
+        'tier': tier,
+        'limit': limit,
+        'remaining': remaining,
+        'retry_after': retry_after,
+    }
+
+    if not allowed:
+        from flask import jsonify, make_response
+        resp = make_response(jsonify({
+            'error': 'rate_limit_exceeded',
+            'message': f'Rate limit exceeded for {tier} tier. Try again in {retry_after}s.',
+            'retry_after': retry_after,
+        }), 429)
+        resp.headers['Retry-After'] = str(retry_after)
+        resp.headers['X-RateLimit-Limit'] = str(limit)
+        resp.headers['X-RateLimit-Remaining'] = '0'
+        resp.headers['X-RateLimit-Reset'] = str(int(__import__('time').time() + retry_after))
+        return resp
+
+    return None
+
+@app.after_request
+def _api_rate_limit_after(response):
+    """Add rate limit headers to every API response."""
+    info = getattr(_g, '_rate_limit_info', None)
+    if info is None:
+        return response
+
+    limit = info['limit']
+    if limit > 0:
+        response.headers['X-RateLimit-Limit'] = str(limit)
+        response.headers['X-RateLimit-Remaining'] = str(info['remaining'])
+        # Reset time = now + retry_after; use time.time() not monotonic
+        import time as _time
+        response.headers['X-RateLimit-Reset'] = str(int(_time.time() + info['retry_after']))
+    return response
 
 app.register_blueprint(auth_bp)
 app.register_blueprint(agents_bp)
@@ -260,6 +341,19 @@ if not _reloader_active or _is_reloader_child:
     from backend.scheduler import scheduler as global_scheduler
     global_scheduler.start()
 
+    # Start periodic cleanup of expired rate-limit entries (login + API)
+    from models.rate_limit import start_periodic_cleanup
+    start_periodic_cleanup()
+    from models.api_rate_limit import (
+        start_periodic_cleanup as start_api_rate_cleanup,
+        reset_sse_connections as _reset_sse_connections,
+    )
+    # Clear stale SSE connection counts left over from a previous (non-graceful)
+    # shutdown — at boot there are zero live connections, so any persisted count
+    # is stale and would otherwise wrongly reject new streams with 429.
+    _reset_sse_connections()
+    start_api_rate_cleanup()
+
     # If this boot was triggered by /restart, send "Evonic ready!" (no LLM)
     _restart_ready_flag = db.get_setting('restart_ready_needed')
     if _restart_ready_flag:
@@ -378,7 +472,7 @@ if not _reloader_active or _is_reloader_child:
 
         from models.chatlog import ChatLog
         from models.chat import is_human_facing_external_user_id
-        _unreplied_types = frozenset({'user', 'final', 'intermediate', 'error'})
+        _unreplied_types = frozenset({'user', 'final', 'intermediate', 'error', 'system'})
 
         try:
             _all_agents = db.get_agents()
@@ -542,8 +636,8 @@ def set_csrf_cookie(response):
         response.set_cookie(
             'csrf_token', token,
             httponly=False,
-            samesite='Strict',
-            secure=not config.DEBUG,
+            samesite='Lax',
+            secure=not config.FORCE_INSECURE_COOKIES,
             path='/',
             max_age=604800,
         )

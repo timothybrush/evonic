@@ -48,6 +48,16 @@ class SlashCommandRegistry:
 # Global registry instance
 command_registry = SlashCommandRegistry()
 
+SUBAGENT_USER_DIRECT_PREFIX = (
+    "You were spawned directly by the user via the `/sub` command"
+    " \u2014 not delegated by your parent agent."
+    " Execute the task below directly and report your result."
+    " Since your response will appear in the parent agent\u2019s chat,"
+    " begin your response with a brief line about the user request,"
+    " so the parent agent has context.\n\n"
+    "--- USER TASK ---\n"
+)
+
 
 def parse_command(message: str) -> Optional[Tuple[str, str]]:
     """Parse a message and extract command + args if it starts with /.
@@ -173,13 +183,37 @@ def _register_builtins():
             is_super = super_agent and super_agent.get('id') == agent_id
         except Exception:
             is_super = False
+        # /cd and /cwd are also available to agents with remote/tunnel workplaces
+        can_cd = is_super
+        if not can_cd:
+            try:
+                agent = db.get_agent(agent_id)
+                if agent:
+                    workplace_id = agent.get('workplace_id')
+                    if workplace_id:
+                        workplace = db.get_workplace(workplace_id)
+                        if workplace and workplace.get('type') in ('remote', 'tunnel'):
+                            can_cd = True
+            except Exception:
+                pass
         lines = ["**Available commands:**"]
         super_only = {"restart", "cd", "cwd", "shutdown"}
         web_only = {"investigate"}  # only shown/available on web, not channels
+        # /sub requires the subagent skill
+        has_subagent = False
+        try:
+            skills = db.get_agent_skills(agent_id)
+            has_subagent = "subagent" in skills
+        except Exception:
+            pass
         for name, desc in commands:
-            if name in super_only and not is_super:
+            if name in {"cd", "cwd"} and not can_cd:
+                continue
+            if name in {"restart", "shutdown"} and not is_super:
                 continue
             if name in web_only and channel_id is not None:
+                continue
+            if name == "sub" and not has_subagent and not is_super:
                 continue
             lines.append(f"- `/{name}` — {desc}")
         return "\n".join(lines)
@@ -257,13 +291,17 @@ def _register_builtins():
         session_log_path = f"agents/{agent_id}/sessions/{jsonl_id}.jsonl"
 
         # Build investigation message
+        # The platform owner is asking the target agent to investigate the
+        # current agent's session — phrase it from the owner's perspective.
         target_name = target.get("name", target_agent_id)
         message = (
-            f"[INVESTIGATION REQUEST from {current_name}]\n\n"
+            f"[INVESTIGATION REQUEST from the platform owner]\n\n"
+            f"The platform owner has asked you to investigate another agent's session.\n\n"
+            f"Agent under investigation: {current_name} ({agent_id})\n"
             f"Session: {session_id}\n"
             f"Session log: {session_log_path}\n"
-            f"Context: {context}\n\n"
-            f"Please investigate the session log above. Focus on: {context}"
+            f"Owner's request: {context}\n\n"
+            f"Please investigate the session log above and report back to the owner."
         )
 
         # Deliver via notify_agent (same mechanism as send_agent_message)
@@ -272,7 +310,7 @@ def _register_builtins():
         _AGENT_MSG_PREFIX = "__agent__"
         result = notify_agent(
             agent_id=target_agent_id,
-            tag=f"AGENT/{current_name}",
+            tag="SYSTEM/Owner",
             message=message,
             external_user_id=f"{_AGENT_MSG_PREFIX}{agent_id}",
             channel_id=None,
@@ -326,21 +364,44 @@ def _register_builtins():
         channel_id: Optional[str],
         args: str,
     ) -> str:
-        from models.db import db
+        import json as _json
 
-        super_agent = db.get_super_agent()
-        if not super_agent or super_agent.get('id') != agent_id:
-            return "Permission denied: /cwd is only available to the super agent."
+        from models.db import db
 
         agent = db.get_agent(agent_id)
         if not agent:
             return "Error: Agent not found."
 
-        workspace = agent.get('workspace')
-        if not workspace:
-            return "No workspace directory configured."
+        # Determine which workspace to show
+        is_super = False
+        try:
+            super_agent = db.get_super_agent()
+            is_super = super_agent and super_agent.get('id') == agent_id
+        except Exception:
+            pass
 
-        return f"Current workspace: {workspace}"
+        if is_super:
+            workspace = agent.get('workspace')
+            if not workspace:
+                return "No workspace directory configured."
+            return f"Current workspace: {workspace}"
+
+        # Check for remote/tunnel workplace
+        workplace_id = agent.get('workplace_id')
+        if workplace_id:
+            workplace = db.get_workplace(workplace_id)
+            if workplace and workplace.get('type') in ('remote', 'tunnel'):
+                cfg_raw = workplace.get('config', '{}')
+                if isinstance(cfg_raw, str):
+                    cfg = _json.loads(cfg_raw)
+                else:
+                    cfg = cfg_raw or {}
+                workspace = cfg.get('workspace_path')
+                if not workspace:
+                    return "No workspace directory configured."
+                return f"Current workspace: {workspace}"
+
+        return "Permission denied: /cwd is only available to the super agent or agents with remote/tunnel workplaces."
 
     command_registry.register(
         "cwd",
@@ -348,7 +409,7 @@ def _register_builtins():
         "Show current workspace directory",
     )
 
-    # /cd — Change workspace directory (super agent only)
+    # /cd — Change workspace directory (super agent or remote/tunnel workplace)
     def cd_handler(
         session_id: str,
         agent_id: str,
@@ -356,34 +417,83 @@ def _register_builtins():
         channel_id: Optional[str],
         args: str,
     ) -> str:
-        from models.db import db
+        import json as _json
 
-        super_agent = db.get_super_agent()
-        if not super_agent or super_agent.get('id') != agent_id:
-            return "Permission denied: /cd is only available to the super agent."
+        from models.db import db
+        from backend.workplaces.manager import workplace_manager
+
+        # Determine if this agent is allowed to use /cd:
+        #   - super agent (local/Docker-based)
+        #   - agent with a remote or tunnel workplace
+        is_super = False
+        try:
+            super_agent = db.get_super_agent()
+            is_super = super_agent and super_agent.get('id') == agent_id
+        except Exception:
+            pass
+
+        agent = db.get_agent(agent_id)
+        if not agent:
+            return "Error: Agent not found."
+
+        workplace_id = agent.get('workplace_id')
+        is_remote_or_tunnel = False
+        if workplace_id:
+            try:
+                workplace = db.get_workplace(workplace_id)
+                if workplace and workplace.get('type') in ('remote', 'tunnel'):
+                    is_remote_or_tunnel = True
+            except Exception:
+                pass
+
+        if not is_super and not is_remote_or_tunnel:
+            return (
+                "Permission denied: /cd is only available to the super agent "
+                "or agents with remote/tunnel workplaces."
+            )
 
         if not args or not args.strip():
             return "Usage: /cd [path] — change workspace directory"
 
-        new_path = os.path.expanduser(args.strip())
+        raw_path = args.strip()
 
-        # Reject paths containing '..' to prevent directory traversal
-        if '..' in new_path.split(os.sep):
-            return f"Error: path contains '..' which is not allowed: {new_path}"
+        # Path sanitization (.. rejection) applies to all
+        sanitized = raw_path.replace('\\', '/')
+        if '..' in sanitized.split('/'):
+            return f"Error: path contains '..' which is not allowed: {raw_path}"
 
-        # Resolve to absolute path and verify it exists
-        new_path = os.path.abspath(new_path)
-        if not os.path.isdir(new_path):
-            return f"Error: directory does not exist: {new_path}"
+        if is_super:
+            # Super agent: local filesystem — expand, verify, update agent.workspace,
+            # and recreate Docker container so the new workspace is mounted.
+            new_path = os.path.expanduser(raw_path)
+            if '..' in new_path.split(os.sep):
+                return f"Error: path contains '..' which is not allowed: {new_path}"
+            new_path = os.path.abspath(new_path)
+            if not os.path.isdir(new_path):
+                return f"Error: directory does not exist: {new_path}"
 
-        # Update agent workspace in DB
-        db.update_agent(agent_id, {'workspace': new_path})
+            db.update_agent(agent_id, {'workspace': new_path})
 
-        # Destroy the old Docker container so the new workspace gets mounted on next tool use
-        from backend.tools.runpy import _destroy_container
-        _destroy_container(session_id)
+            from backend.tools.runpy import _destroy_container
+            _destroy_container(session_id)
 
-        return f"Workspace changed to: {new_path}"
+            return f"Workspace changed to: {new_path}"
+
+        # Remote / tunnel agent: update the workplace config (skip
+        # os.path.expanduser / os.path.abspath / os.path.isdir — meaningless
+        # for remote filesystems). Also update the in-memory backend so the
+        # change takes effect immediately.
+        workplace = db.get_workplace(workplace_id)
+        cfg_raw = workplace.get('config', '{}') if workplace else '{}'
+        if isinstance(cfg_raw, str):
+            cfg = _json.loads(cfg_raw)
+        else:
+            cfg = cfg_raw or {}
+        cfg['workspace_path'] = raw_path
+        db.update_workplace(workplace_id, {'config': cfg})
+        workplace_manager.set_backend_workspace(workplace_id, raw_path)
+
+        return f"Workspace changed to: {raw_path}"
 
     command_registry.register(
         "cd",
@@ -456,18 +566,9 @@ def _register_builtins():
             except Exception:
                 pass
 
-            # Resolve the correct restart target:
-            # - Release mode (BASE_DIR inside releases/): follow current symlink
-            # - Dev mode: restart from project root (BASE_DIR)
+            # Flat-repo architecture: project root IS the live directory.
             import config as _config
-            _base = os.path.realpath(_config.BASE_DIR)
-            _rel_marker = os.sep + 'releases' + os.sep
-            if _rel_marker in _base:
-                _project_root = _base.split(_rel_marker)[0]
-                _current = os.path.join(_project_root, 'current')
-                _target = os.path.realpath(_current) if os.path.islink(_current) else _base
-            else:
-                _target = _base
+            _target = os.path.realpath(_config.BASE_DIR)
             _app_py = os.path.join(_target, 'app.py')
             _venv_python = os.path.join(_target, '.venv', 'bin', 'python')
             _python = _venv_python if os.path.exists(_venv_python) else sys.executable
@@ -901,6 +1002,174 @@ def _register_builtins():
         "Show or set agent's LLM model — /model [id]",
     )
 
+
+
+    # /sub — Spawn a sub-agent with a direct task (requires subagent skill)
+    def sub_handler(
+        session_id: str,
+        agent_id: str,
+        external_user_id: str,
+        channel_id: Optional[str],
+        args: str,
+    ) -> str:
+        if not args or not args.strip():
+            return "Usage: /sub <task description>"
+
+        from models.db import db
+
+        # Super agents have implicit access to all skills
+        super_agent = db.get_super_agent()
+        is_super = super_agent and super_agent.get('id') == agent_id
+        if not is_super:
+            skills = db.get_agent_skills(agent_id)
+            if "subagent" not in skills:
+                return "This command requires the `subagent` skill to be assigned to this agent."
+
+        # Fetch parent agent
+        parent_agent = db.get_agent(agent_id)
+        if not parent_agent:
+            return "Error: Agent not found."
+
+        # Spawn sub-agent
+        from backend.subagent_manager import subagent_manager
+        try:
+            sub_id = subagent_manager.spawn(parent_agent)
+        except ValueError as e:
+            return f"Failed to spawn sub-agent: {e}"
+
+        # Resolve report_to destination
+        from backend.agent_report_to import resolve_report_to_for_subagent_spawn
+        report_to_id, report_to_channel_id = resolve_report_to_for_subagent_spawn(
+            agent_id, external_user_id, channel_id
+        )
+
+        # Build task message with direct-spawn prefix
+        task_text = args.strip()
+        message = SUBAGENT_USER_DIRECT_PREFIX + task_text
+
+        # Send task message to the sub-agent
+        from backend.agent_runtime.notifier import notify_agent
+        result = notify_agent(
+            agent_id=sub_id,
+            tag="SUBSPAWN",
+            message=message,
+            external_user_id=f"__agent__{agent_id}",
+            channel_id=channel_id,
+            dedup=False,
+            trigger_llm=True,
+            metadata={
+                "agent_message": True,
+                "from_agent_id": agent_id,
+                "subagent_user_direct": True,
+                "report_to_id": report_to_id,
+                "report_to_channel_id": report_to_channel_id,
+            },
+        )
+
+        if not result.get("success"):
+            reason = result.get("reason", "unknown")
+            return f"Sub-agent spawned ({sub_id}) but failed to deliver task: {reason}."
+
+        return f"Sub-agent spawned: **{sub_id}** — task sent."
+
+    command_registry.register(
+        "sub",
+        sub_handler,
+        "Spawn a sub-agent with a direct task",
+    )
+
+    # /detach — Hand off the running long-running process to a background watcher
+    def detach_handler(
+        session_id: str,
+        agent_id: str,
+        external_user_id: str,
+        channel_id: Optional[str],
+        args: str,
+    ) -> str:
+        from backend.agent_runtime import agent_runtime
+        from backend.agent_runtime.background_jobs import (
+            background_jobs, create_detach_schedule)
+
+        jobs = background_jobs.active_for_session(session_id)
+        if not jobs:
+            return (
+                "No detachable background process found. /detach only works for "
+                "builds/downloads launched via the long-running guard (tmux/screen)."
+            )
+
+        # End the current polling turn so the agent stops waiting and can chat.
+        agent_runtime.request_stop(session_id)
+
+        detached = []
+        for job in jobs:
+            schedule_id = create_detach_schedule(
+                job, agent_id, external_user_id, channel_id)
+            if schedule_id:
+                background_jobs.mark_detached(job.job_id, schedule_id)
+                detached.append(job)
+
+        if not detached:
+            return "Failed to detach: could not create the background watcher."
+
+        names = ", ".join(f"`{j.command}`" for j in detached)
+        return (
+            f"Detached {len(detached)} background job(s): {names}.\n"
+            "They keep running — I'll report back when they finish (even if the "
+            "server restarts). Check anytime with /jobs."
+        )
+
+    command_registry.register(
+        "detach",
+        detach_handler,
+        "Detach the running long-running process to the background",
+    )
+
+    # /jobs — List background jobs tracked for this session
+    def jobs_handler(
+        session_id: str,
+        agent_id: str,
+        external_user_id: str,
+        channel_id: Optional[str],
+        args: str,
+    ) -> str:
+        import time as _time
+        from backend.agent_runtime.background_jobs import (
+            background_jobs, SCHEDULE_OWNER_TYPE)
+        from backend.scheduler import scheduler
+
+        lines = []
+
+        # Attached (not yet detached) jobs — live only in the in-memory registry.
+        for j in background_jobs.active_for_session(session_id):
+            elapsed = int(_time.time() - j.started_at)
+            lines.append(f"- `{j.command}` — ⏳ running (attached), {elapsed}s "
+                         f"· log: {j.log_file}")
+
+        # Detached jobs — persisted poll schedules for this session.
+        try:
+            schedules = scheduler.list_schedules(
+                owner_type=SCHEDULE_OWNER_TYPE, owner_id=agent_id)
+        except Exception:
+            schedules = []
+        for s in schedules:
+            cfg = s.get("action_config") or {}
+            if cfg.get("session_id") != session_id:
+                continue
+            cmd = cfg.get("command", "?")
+            log_file = cfg.get("log_file", "")
+            lines.append(f"- `{cmd}` — ⏳ running (detached, watched), "
+                         f"· log: {log_file}")
+
+        if not lines:
+            return ("No active background jobs for this session. "
+                    "(Finished jobs are reported in chat and then cleared.)")
+        return "**Background jobs:**\n" + "\n".join(lines)
+
+    command_registry.register(
+        "jobs",
+        jobs_handler,
+        "List background jobs for this session",
+    )
 
 # Register builtins at import time
 _register_builtins()

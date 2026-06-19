@@ -5,6 +5,7 @@ from typing import Dict, Any
 
 from flask import Blueprint, render_template, jsonify, request
 
+from backend.audit_logger import audit
 import config
 from models.db import db
 
@@ -13,6 +14,15 @@ _logger = logging.getLogger(__name__)
 settings_bp = Blueprint('settings', __name__)
 
 _SENSITIVE_MODEL_KEYS = frozenset({'api_key'})
+
+
+def _audit_setting_change(key, old_val, new_val):
+    """Log a setting change if old and new values differ."""
+    ip = request.remote_addr or ''
+    old_str = str(old_val)[:500] if old_val is not None else ''
+    new_str = str(new_val)[:500]
+    if old_str != new_str:
+        audit.log_setting_change(user_id='admin', key=key, old_value=old_str, new_value=new_str, ip=ip)
 
 
 def _sanitize_model(model: Dict[str, Any]) -> Dict[str, Any]:
@@ -486,7 +496,9 @@ def api_two_pass_enabled():
     if request.method == 'PUT':
         data = request.get_json() or {}
         enabled = '1' if data.get('enabled', False) else '0'
+        old_val = db.get_setting('two_pass_enabled', default)
         db.set_setting('two_pass_enabled', enabled)
+        _audit_setting_change('two_pass_enabled', old_val, enabled)
         return jsonify({'success': True, 'enabled': enabled == '1'})
     val = db.get_setting('two_pass_enabled', default)
     return jsonify({'enabled': val == '1'})
@@ -499,7 +511,9 @@ def api_public_history():
     if request.method == 'PUT':
         data = request.get_json()
         enabled = '1' if data.get('enabled', False) else '0'
+        old_val = db.get_setting('public_history', '0')
         db.set_setting('public_history', enabled)
+        _audit_setting_change('public_history', old_val, enabled)
         return jsonify({'success': True, 'enabled': enabled == '1'})
     val = db.get_setting('public_history', '0')
     return jsonify({'enabled': val == '1'})
@@ -511,7 +525,9 @@ def api_long_running_guard():
     from models.db import db
     data = request.get_json()
     enabled = '1' if data.get('enabled', True) else '0'
+    old_val = db.get_setting('long_running_guard_enabled', '1' if config.LONG_RUNNING_GUARD_ENABLED else '0')
     db.set_setting('long_running_guard_enabled', enabled)
+    _audit_setting_change('long_running_guard_enabled', old_val, enabled)
     return jsonify({'success': True, 'enabled': enabled == '1'})
 
 
@@ -521,7 +537,9 @@ def api_message_wrapper():
     from models.db import db
     data = request.get_json()
     enabled = '1' if data.get('enabled', True) else '0'
+    old_val = db.get_setting('message_wrapper_enabled', '1')
     db.set_setting('message_wrapper_enabled', enabled)
+    _audit_setting_change('message_wrapper_enabled', old_val, enabled)
     return jsonify({'success': True, 'enabled': enabled == '1'})
 
 
@@ -636,7 +654,9 @@ def api_events_dispatch():
     if request.method == 'PUT':
         data = request.get_json()
         enabled = '1' if data.get('enabled', True) else '0'
+        old_val = db.get_setting('events_dispatch_enabled', '1')
         db.set_setting('events_dispatch_enabled', enabled)
+        _audit_setting_change('events_dispatch_enabled', old_val, enabled)
         return jsonify({'success': True, 'enabled': enabled == '1'})
     val = db.get_setting('events_dispatch_enabled', '1')
     return jsonify({'enabled': val == '1'})
@@ -651,7 +671,9 @@ def api_theme():
         theme = data.get('theme', 'system')
         if theme not in ('light', 'dark', 'system'):
             theme = 'system'
+        old_val = db.get_setting('theme', 'system')
         db.set_setting('theme', theme)
+        _audit_setting_change('theme', old_val, theme)
         return jsonify({'success': True, 'theme': theme})
     val = db.get_setting('theme', 'system')
     return jsonify({'theme': val})
@@ -672,6 +694,11 @@ def api_task_classifier():
                 return jsonify({'success': False, 'error': 'Model not found'}), 404
         db.set_setting('task_classifier_enabled', enabled)
         db.set_setting('task_classifier_model_id', model_id)
+        old_enabled = db.get_setting('task_classifier_enabled', default_enabled)
+        old_model_id = db.get_setting('task_classifier_model_id', '')
+        _audit_setting_change('task_classifier_enabled', old_enabled, enabled)
+        if old_model_id != model_id:
+            _audit_setting_change('task_classifier_model_id', old_model_id, model_id)
         return jsonify({
             'success': True,
             'enabled': enabled == '1',
@@ -709,10 +736,13 @@ def api_set_default_model():
         return jsonify({'success': False, 'error': 'Model not found'}), 404
     
     try:
+        old_model = db.get_default_model()
+        old_id = old_model.get('id', '') if old_model else ''
         with db._connect() as conn:
             conn.execute("UPDATE llm_models SET is_default = 0")
             conn.execute("UPDATE llm_models SET is_default = 1 WHERE id = ?", (model_id,))
             conn.commit()
+        _audit_setting_change('default_model', old_id, model_id)
         return jsonify({'success': True, 'model': _sanitize_model(db.get_default_model())})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -737,6 +767,7 @@ def api_get_general_settings():
         'max_tool_iterations': int(db.get_setting('max_tool_iterations', str(config.AGENT_MAX_TOOL_ITERATIONS))),
         'agent_sidebar_limit': int(db.get_setting('agent_sidebar_limit', str(config.AGENT_SIDEBAR_LIMIT))),
         'theme': db.get_setting('theme', 'system'),
+        'vision_model_id': db.get_setting('vision_model_id', ''),
     })
 
 
@@ -892,6 +923,23 @@ def api_batch_save():
             else:
                 errors.append('default_model_id: Model not found')
 
+    # Vision Model
+    if 'vision_model_id' in settings:
+        vision_model_id = settings['vision_model_id']
+        if vision_model_id:
+            model = db.get_model_by_id(vision_model_id)
+            if model and model.get('vision_supported'):
+                db.set_setting('vision_model_id', vision_model_id)
+                results['vision_model_id'] = vision_model_id
+            elif model:
+                errors.append('vision_model_id: Model does not support vision')
+            else:
+                errors.append('vision_model_id: Model not found')
+        else:
+            # Allow clearing the setting
+            db.set_setting('vision_model_id', '')
+            results['vision_model_id'] = ''
+
     if errors:
         return jsonify({
             'success': True,
@@ -901,4 +949,106 @@ def api_batch_save():
         })
 
     return jsonify({'success': True, 'results': results})
+
+
+# ---- User Management (Admin) ----
+
+
+@settings_bp.route('/api/settings/users', methods=['GET'])
+def api_list_users():
+    """List all users with optional status filter.
+
+    Query params:
+        filter: all | approved | blocked | pending  (default: all)
+        limit: int (default: 50)
+        offset: int (default: 0)
+    """
+    status_filter = request.args.get('filter', 'all')
+    limit = min(int(request.args.get('limit', 50)), 200)
+    offset = max(int(request.args.get('offset', 0)), 0)
+
+    with db._connect() as conn:
+        conn.row_factory = db._row_factory
+        cursor = conn.cursor()
+
+        conditions = ['u.deleted_at IS NULL']
+        params = []
+
+        if status_filter == 'approved':
+            conditions.append('u.is_approved = 1 AND u.blocked_at IS NULL')
+        elif status_filter == 'blocked':
+            conditions.append('u.is_approved = 2')
+        elif status_filter == 'pending':
+            conditions.append('(u.is_approved = 0 OR u.is_approved IS NULL)')
+
+        where = ' AND '.join(conditions)
+
+        cursor.execute(f"""
+            SELECT u.*,
+                   (SELECT COUNT(*) FROM user_audit_log WHERE user_id = u.id AND action IN ('blocked', 'unblocked')) as audit_count
+            FROM users u
+            WHERE {where}
+            ORDER BY u.last_active_at DESC NULLS LAST
+            LIMIT ? OFFSET ?
+        """, params + [limit, offset])
+
+        users = [dict(r) for r in cursor.fetchall()]
+
+        # Count total for pagination
+        cursor.execute(f'SELECT COUNT(*) FROM users u WHERE {where}', params)
+        total = cursor.fetchone()[0]
+
+    return jsonify({'users': users, 'total': total, 'limit': limit, 'offset': offset})
+
+
+@settings_bp.route('/api/admin/blocked-users', methods=['GET'])
+def api_blocked_users():
+    """List all blocked users (dedicated endpoint)."""
+    with db._connect() as conn:
+        conn.row_factory = db._row_factory
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT u.*,
+                   (SELECT created_at FROM user_audit_log
+                    WHERE user_id = u.id AND action = 'blocked'
+                    ORDER BY created_at DESC LIMIT 1) as blocked_at_audit,
+                   (SELECT actor_id FROM user_audit_log
+                    WHERE user_id = u.id AND action = 'blocked'
+                    ORDER BY created_at DESC LIMIT 1) as blocked_by
+            FROM users u
+            WHERE u.is_approved = 2 AND u.deleted_at IS NULL
+            ORDER BY u.blocked_at DESC
+        """)
+        users = [dict(r) for r in cursor.fetchall()]
+
+    return jsonify({'users': users, 'total': len(users)})
+
+
+@settings_bp.route('/api/settings/users/<user_id>/block', methods=['POST'])
+def api_block_user(user_id):
+    """Block a user by ID."""
+    data = request.get_json() or {}
+    reason = data.get('reason', '')
+    ok = db.block_user(user_id, reason=reason, actor_type='admin', actor_id='web_admin')
+    if ok:
+        audit.log_user_management(user_id='admin', target_user=user_id, action='block', ip=request.remote_addr or '', detail=reason)
+        return jsonify({'success': True, 'user_id': user_id})
+    return jsonify({'error': 'User not found or already blocked'}), 404
+
+
+@settings_bp.route('/api/settings/users/<user_id>/unblock', methods=['POST'])
+def api_unblock_user(user_id):
+    """Unblock a user by ID."""
+    ok = db.unblock_user(user_id, actor_type='admin', actor_id='web_admin')
+    if ok:
+        audit.log_user_management(user_id='admin', target_user=user_id, action='unblock', ip=request.remote_addr or '')
+        return jsonify({'success': True, 'user_id': user_id})
+    return jsonify({'error': 'User not found or not blocked'}), 404
+
+
+@settings_bp.route('/api/settings/users/<user_id>/audit', methods=['GET'])
+def api_user_audit(user_id):
+    """Get audit log for a specific user."""
+    logs = db.get_audit_log(user_id=user_id)
+    return jsonify({'user_id': user_id, 'audit_logs': logs})
 

@@ -487,7 +487,7 @@ function _buildSysBalloon(tag, content, tagColorClass, fullColorClass, truncateL
     const $tagSpan = $('<span class="text-xs font-semibold mr-1.5">').addClass(tagColorClass).text(tag);
     const $preview = $('<span class="sys-balloon-content block">').append($tagSpan, document.createTextNode(truncated));
     $header.append($preview);
-    if (needsCollapse) $header.append($('<span class="sys-chevron text-[10px] flex-shrink-0 mt-0.5">').addClass(fullColorClass).html('&#9660;'));
+    if (needsCollapse) $header.append($('<span class="sys-chevron text-[10px] flex-shrink-0 mt-0.5 ml-auto">').addClass(fullColorClass).html('&#9660;'));
 
     const $full = $('<div class="sys-balloon-full whitespace-pre-wrap">').css('display','none').append(
         $('<span class="text-xs font-semibold mr-1.5">').addClass(tagColorClass).text(tag),
@@ -604,6 +604,101 @@ function _wrapImageWithDownload($img) {
     });
 }
 
+const _COPY_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+const _CHECK_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+
+function _copyText(text, onDone) {
+    const fallback = () => {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); onDone(); } catch (_) {}
+        document.body.removeChild(ta);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(onDone).catch(fallback);
+    } else {
+        fallback();
+    }
+}
+
+// Applies highlight.js syntax highlighting to every <pre><code> block in a
+// rendered markdown bubble. Runs on the live DOM (after sanitize), so the
+// injected token <span>s never pass through the sanitizer. No-op if hljs is
+// not loaded. Each block is guarded so one bad block can't break the bubble.
+function _highlightCode($bubble) {
+    if (typeof window === 'undefined' || !window.hljs) return;
+    $bubble.find('pre code').each(function () {
+        if (this.dataset.highlighted) return;
+        try {
+            window.hljs.highlightElement(this);
+        } catch (e) {
+            this.dataset.highlighted = 'error';
+        }
+    });
+}
+
+// Adds a hover-revealed copy button to the bottom-right of every <pre> code block
+// and <blockquote> inside a rendered markdown bubble.
+function _addCopyButtons($bubble) {
+    $bubble.find('pre, blockquote').each(function () {
+        const $el = $(this);
+        if ($el.data('copyAttached')) return;
+        $el.data('copyAttached', true);
+
+        // Wrap so the button stays pinned even when a <pre> scrolls horizontally.
+        $el.wrap($('<div>').css({ position: 'relative' }));
+        const $container = $el.parent();
+
+        const $btn = $('<button type="button">')
+            .attr('title', 'Copy')
+            .attr('aria-label', 'Copy to clipboard')
+            .css({
+                position: 'absolute',
+                bottom: '6px',
+                right: '6px',
+                zIndex: 5,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: '28px',
+                height: '28px',
+                padding: '0',
+                borderRadius: '6px',
+                border: 'none',
+                cursor: 'pointer',
+                color: 'currentColor',
+                backgroundColor: 'rgba(128,128,128,0.25)',
+                opacity: 0,
+                transition: 'opacity 150ms ease',
+            })
+            .html(_COPY_ICON)
+            .on('click', function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                const text = $el.is('pre') ? ($el.find('code').text() || $el.text()) : $el.text();
+                _copyText(text, function () {
+                    $btn.html(_CHECK_ICON).css('color', '#22c55e');
+                    setTimeout(function () { $btn.html(_COPY_ICON).css('color', 'currentColor'); }, 1500);
+                });
+            });
+        $container.append($btn);
+
+        $container.on('mouseenter', function () { $btn.css('opacity', 1); });
+        $container.on('mouseleave', function () { if (!$btn.is(':focus')) $btn.css('opacity', 0); });
+        $btn.on('mouseenter', function () { $(this).css('backgroundColor', 'rgba(128,128,128,0.4)'); });
+        $btn.on('mouseleave', function () { $(this).css('backgroundColor', 'rgba(128,128,128,0.25)'); });
+        $btn.on('focus', function () { $(this).css({ opacity: 1, outline: '2px solid rgba(128,128,128,0.7)', outlineOffset: '1px' }); });
+        $btn.on('blur', function () {
+            $(this).css({ outline: 'none', outlineOffset: '0' });
+            if (!$container.is(':hover')) $btn.css('opacity', 0);
+        });
+    });
+}
+
 export function buildMessageBubble(role, content, opts = {}, cfg = {}) {
     const {
         userAlign = 'right',
@@ -645,8 +740,7 @@ export function buildMessageBubble(role, content, opts = {}, cfg = {}) {
         const agentTag = agentMatch ? agentMatch[1] : '';
         const agentContent = agentTag ? content.slice(agentMatch[0].length) : content;
         $bubble = $('<div class="bg-blue-100 text-blue-900 border border-blue-300 rounded-2xl px-4 py-2.5 text-sm break-words">');
-        if (agentTag) $bubble.append($('<span class="text-xs font-semibold text-blue-500 mr-1.5">').text(agentTag));
-        $bubble.append(document.createTextNode(agentContent));
+        $bubble.append(_buildSysBalloon(agentTag, agentContent, 'text-blue-500', 'text-blue-400', 120));
 
     } else if (isSystemUser) {
         const sysMatch = content.match(/^(\[(?:SYSTEM(?:\/[^\]]*)?|System\/[^\]]*)\])\s*/);
@@ -693,14 +787,14 @@ export function buildMessageBubble(role, content, opts = {}, cfg = {}) {
             : escape(content);
         $bubble = $('<div class="chat-prose terminal-output rounded-2xl px-4 py-2.5 text-sm break-words">');
         $bubble.css({
-            'background-color': '#080e0f',
+            'background-color': '#152022',
             'color': '#359635',
             'border': '1px solid #174217'
         });
         $bubble.attr('role', 'article');
         $bubble.html(rendered);
         $bubble.find('pre').css({
-            'background-color': '#030607',
+            'background-color': '#0d1517',
             'border': '1px solid #174217',
             'border-radius': '0.375rem'
         });
@@ -714,6 +808,7 @@ export function buildMessageBubble(role, content, opts = {}, cfg = {}) {
             _wrapImageWithDownload($img);
             retrofitImageForLazy($img);
         });
+        _addCopyButtons($bubble);
     } else if (isSlashCmd) {
         // Slash command response — blue styling, visible to user only (not sent to LLM)
         const rendered = typeof marked !== 'undefined'
@@ -727,6 +822,8 @@ export function buildMessageBubble(role, content, opts = {}, cfg = {}) {
             _wrapImageWithDownload($img);
             retrofitImageForLazy($img);
         });
+        _highlightCode($bubble);
+        _addCopyButtons($bubble);
     } else {
         // assistant: markdown with sanitizer
         const rendered = typeof marked !== 'undefined'
@@ -740,6 +837,8 @@ export function buildMessageBubble(role, content, opts = {}, cfg = {}) {
             _wrapImageWithDownload($img);
             retrofitImageForLazy($img);
         });
+        _highlightCode($bubble);
+        _addCopyButtons($bubble);
     }
 
     const $inner = $('<div class="max-w-[80%] min-w-0">').append($bubble);

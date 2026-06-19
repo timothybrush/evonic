@@ -40,6 +40,7 @@ from backend.plugin_manager import get_busy_message
 from backend.slash_commands import parse_command, execute_command
 from backend.agent_runtime.prefetch import TurnPrefetcher
 import atexit
+import json
 import re
 from config import AGENT_MAX_TOOL_RESULT_CHARS as MAX_TOOL_RESULT_CHARS
 from config import STALE_SESSION_INJECTION_ENABLED, STALE_SESSION_THRESHOLD_SECONDS
@@ -951,6 +952,10 @@ class AgentRuntime:
             if stderr:
                 parts.append(stderr)
             body = "\n".join(parts) if parts else "(no output)"
+        # Truncate output if it exceeds MAX_OUTPUT characters (both stdout+stderr).
+        MAX_OUTPUT = 1000
+        if len(body) > MAX_OUTPUT:
+            body = body[:MAX_OUTPUT] + "\n… (truncated)"
         response = f"$ {cmd}\n```bash\n{body}\n```"
         exit_code = result.get('exit_code')
         if exit_code not in (0, None):
@@ -1016,6 +1021,22 @@ class AgentRuntime:
         # Block disabled agents (super agent is always allowed; sub-agents inherit parent's enabled state)
         if not agent.get('is_super') and not agent.get('enabled', True):
             return {"response": "This agent is currently disabled.", "tool_trace": []}
+
+        # Defense-in-depth: check if the user is blocked (FINDING-012).
+        # Skip internal/system users (they have no user record to check).
+        if external_user_id not in ('__system__', '') and not external_user_id.startswith('__agent__'):
+            if db.is_user_blocked_by_external_id(external_user_id):
+                _logger.info(
+                    "[handle_message] agent=%s sender=%s BLOCKED — rejecting message.",
+                    agent_id, external_user_id,
+                )
+                return {
+                    "response": (
+                        "Your account has been suspended. "
+                        "Please contact the administrator for further information."
+                    ),
+                    "tool_trace": [],
+                }
 
         # Determine if this is a sub-agent (uses parent's per-agent chat DB)
         is_subagent = agent.get('is_subagent', False)
@@ -1083,13 +1104,45 @@ class AgentRuntime:
         # Flag user message as wrapped if preference wrapper is enabled for this agent
         if _should_wrap_user_message(agent):
             meta['wrapped'] = True
-        # Enrich metadata for agent-originated messages
-        if external_user_id.startswith("__agent__") and not meta.get('agent_message'):
-            sender_id = external_user_id[len("__agent__"):]
-            sender_agent = db.get_agent(sender_id)
-            meta['agent_message'] = True
-            meta['from_agent_id'] = sender_id
-            meta['from_agent_name'] = sender_agent.get('name', sender_id) if sender_agent else sender_id
+        # Enrich metadata and handle inter-agent clearing
+        if external_user_id.startswith("__agent__"):
+            # Clear session context before saving the new message when
+            # inter_agent_clear_context is enabled for this agent.
+            # This ensures the agent processes the message with a fresh
+            # context containing only the sender's message.
+            # Must run BEFORE the not meta.get('agent_message') guard because
+            # send_agent_message already sets agent_message=True in metadata.
+            if agent.get('inter_agent_clear_context'):
+                # Skip clearing if the last message in this session arrived
+                # less than 7 seconds ago — the sending agent may be sending
+                # multiple messages concurrently.
+                last_ts = db.get_last_message_timestamp(session_id, agent_id=db_agent_id)
+                if last_ts and (time.time() - last_ts) < 7:
+                    _logger.debug(
+                        "Skipped inter-agent clear for session %s: "
+                        "last message was %.1fs ago (within 7s window)",
+                        session_id, time.time() - last_ts)
+                else:
+                    db.clear_session(session_id, agent_id=db_agent_id)
+                    # Reset fallback model so the agent starts fresh with
+                    # its primary model on the next inter-agent message.
+                    try:
+                        _as_raw = db.get_agent_state(db_agent_id)
+                        _as = json.loads(_as_raw) if _as_raw else {}
+                        if _as.pop('active_fallback_model_id', None):
+                            db.upsert_agent_state(
+                                json.dumps(_as), agent_id=db_agent_id)
+                            _logger.info(
+                                "Reset fallback model for agent %s after "
+                                "inter-agent clear", db_agent_id)
+                    except Exception:
+                        pass
+            if not meta.get('agent_message'):
+                sender_id = external_user_id[len("__agent__"):]
+                sender_agent = db.get_agent(sender_id)
+                meta['agent_message'] = True
+                meta['from_agent_id'] = sender_id
+                meta['from_agent_name'] = sender_agent.get('name', sender_id) if sender_agent else sender_id
         _db_retry(db.add_chat_message, session_id, 'user', message or "[Image]",
                   agent_id=db_agent_id, metadata=meta if meta else None, label="save user message")
         _cl_user = chatlog_manager.get(db_agent_id, session_id)
@@ -1493,7 +1546,7 @@ class AgentRuntime:
             _used_prefetch = True
             _logger.debug("Turn prefetch HIT for session %s — skipping context build", ctx.session_id)
         else:
-            system_prompt = _ctx.build_system_prompt(agent)
+            system_prompt = _ctx.build_system_prompt(agent, injected_system_vars=agent.get('injected_system_vars'))
             tools = _ctx.build_tools(agent)
             _used_prefetch = False
             messages = [{"role": "system", "content": system_prompt}]
@@ -1523,20 +1576,45 @@ class AgentRuntime:
         # Keep this alias so the rest of _do_process_inner reads naturally.
 
         def _apply_multimodal(msg: dict) -> dict:
-            """Apply multimodal formatting for user messages with image/audio/video if agent supports it."""
+            """Apply multimodal formatting for user messages with audio/video if agent supports it.
+
+            Images are NEVER auto-fed to the main LLM — images are always accessed via
+            the ``describe_image`` tool instead.
+            """
             if msg.get('role') != 'user':
                 return msg
-            img = msg.pop('_image_url', None) if agent.get('vision_enabled') else msg.pop('_image_url', None) and None
+            # Always pop _image_url but NEVER feed it to the LLM.
+            msg.pop('_image_url', None)
+            # Append attachment_info note so agents see file path metadata.
+            _att = msg.pop('attachment_info', None) or msg.get('attachment_info')
+            if _att and isinstance(_att, dict):
+                fp = _att.get('file_path', '')
+                fn = _att.get('filename', '')
+                mt = _att.get('mime_type', '')
+                sb = int(_att.get('size_bytes', 0) or 0)
+                is_img = bool(mt and mt.startswith('image/'))
+                if sb >= 1048576:
+                    sz = f"{sb / 1048576:.1f} MB"
+                elif sb >= 1024:
+                    sz = f"{sb / 1024:.1f} KB"
+                else:
+                    sz = f"{sb} B"
+                note = (
+                    f"\n\n[Attachment: {fn} ({mt}, {sz})]"
+                    f"\nFile path: {fp}"
+                )
+                if is_img:
+                    note += "\nUse the `describe_image` tool to view and analyze this image."
+                content = msg.get('content', '') or ''
+                msg['content'] = content.rstrip() + note
             audio = msg.pop('_audio_url', None) if agent.get('audio_enabled') else msg.pop('_audio_url', None) and None
             video = msg.pop('_video_url', None) if agent.get('video_enabled') else msg.pop('_video_url', None) and None
-            if not img and not audio and not video:
+            if not audio and not video:
                 return msg
             parts = []
             text_content = msg.get('content', '')
             if text_content and text_content not in ('[Image]', '[Audio]', '[Video]'):
                 parts.append({"type": "text", "text": text_content})
-            if img:
-                parts.append({"type": "image_url", "image_url": {"url": img}})
             if audio:
                 # OpenAI-compatible input_audio format
                 # Extract base64 data and format from data URL
@@ -1581,6 +1659,9 @@ class AgentRuntime:
                     _vid = _cur_meta.get('video_url')
                     if _vid:
                         _cur_msg['_video_url'] = _vid
+                    _att = _cur_meta.get('attachment_info')
+                    if _att:
+                        _cur_msg['attachment_info'] = _att
                     messages.append(_apply_multimodal(_cur_msg))
         else:
             # Prefer JSONL-based context if the log has entries for this session
@@ -1778,6 +1859,8 @@ class AgentRuntime:
                 'disable_turn_prefetch': agent.get('disable_turn_prefetch', 0),
                 'variables': db.get_agent_variables_dict(db_agent_id),
                 'run_as_user': agent.get('run_as_user'),
+                'vision_model_id': agent.get('vision_model_id'),
+                'vision_enabled': agent.get('vision_enabled', 1),
             }
         # Propagate agent_message_depth and from_agent_id from incoming message metadata
         if ctx.external_user_id.startswith("__agent__"):
@@ -1789,6 +1872,8 @@ class AgentRuntime:
                         agent_context['agent_message_depth'] = _meta['agent_message_depth']
                     if _meta.get('from_agent_id'):
                         agent_context['from_agent_id'] = _meta['from_agent_id']
+                    if _meta.get('injected_system_vars') is not None:
+                        agent_context['injected_system_vars'] = _meta['injected_system_vars']
             else:
                 # Fall back to SQLite for pre-migration sessions
                 _recent = db.get_session_messages(ctx.session_id, limit=5, agent_id=db_agent_id)
@@ -1800,6 +1885,8 @@ class AgentRuntime:
                                 agent_context['agent_message_depth'] = _meta['agent_message_depth']
                             if _meta.get('from_agent_id'):
                                 agent_context['from_agent_id'] = _meta['from_agent_id']
+                            if _meta.get('injected_system_vars') is not None:
+                                agent_context['injected_system_vars'] = _meta['injected_system_vars']
                         break
 
         # Agent state: restore or create, then check for user approval
@@ -1919,20 +2006,22 @@ class AgentRuntime:
             _sa_heartbeat.start()
 
         try:
-            response_raw, tool_trace, timeline = _loop.run_tool_loop(
-                agent=agent,
-                agent_context=agent_context,
-                messages=messages,
-                tools=tools,
-                session_id=ctx.session_id,
-                llm_lock=self._llm_serializer._llm_lock,
-                stop_event=self._get_stop_event(ctx.session_id),
-                session_skill_mds=self._session_skill_mds,
-                session_skill_tools=self._session_skill_tools,
-                llm_log_path=_llm_log_path(db_agent_id),
-                inject_queue=self._get_inject_queue(ctx.session_id),
-                session_db_agent_id=db_agent_id,
-            )
+            from backend.llm_usage_events import usage_context
+            with usage_context('agent_turn', agent_id, agent.get('name'), ctx.session_id):
+                response_raw, tool_trace, timeline = _loop.run_tool_loop(
+                    agent=agent,
+                    agent_context=agent_context,
+                    messages=messages,
+                    tools=tools,
+                    session_id=ctx.session_id,
+                    llm_lock=self._llm_serializer._llm_lock,
+                    stop_event=self._get_stop_event(ctx.session_id),
+                    session_skill_mds=self._session_skill_mds,
+                    session_skill_tools=self._session_skill_tools,
+                    llm_log_path=_llm_log_path(db_agent_id),
+                    inject_queue=self._get_inject_queue(ctx.session_id),
+                    session_db_agent_id=db_agent_id,
+                )
         finally:
             if _sa_heartbeat:
                 _sa_stop.set()
@@ -2051,16 +2140,15 @@ class AgentRuntime:
         msg_image = _msg_meta.get("image_url") if _msg_meta else None
         msg_audio = _msg_meta.get("audio_url") if _msg_meta else None
         msg_video = _msg_meta.get("video_url") if _msg_meta else None
-        has_image = msg_image and agent.get("vision_enabled")
+        # Images are NEVER auto-fed — use describe_image tool instead.
         has_audio = msg_audio and agent.get("audio_enabled")
         has_video = msg_video and agent.get("video_enabled")
-        if has_image or has_audio or has_video:
+        if has_audio or has_video:
             parts = []
             text_content = msg.get("content", "")
             if text_content and text_content not in ("[Image]", "[Audio]", "[Video]"):
                 parts.append({"type": "text", "text": text_content})
-            if has_image:
-                parts.append({"type": "image_url", "image_url": {"url": msg_image}})
+            # NOTE: Images are never auto-fed — use describe_image tool instead.
             if has_audio:
                 if msg_audio.startswith("data:"):
                     try:

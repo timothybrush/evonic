@@ -109,7 +109,7 @@ def strip_thinking_tags(content: str) -> Tuple[str, Optional[str]]:
         thinking_text = parts[0].strip()
         cleaned_text = parts[1].strip() if len(parts) > 1 else ""
         if thinking_text:
-            return _fix_bold(cleaned_text) or "No content generated", thinking_text
+            return _fix_bold(cleaned_text) or "", thinking_text
         return _fix_bold(cleaned_text) or content.replace("</think>", "").strip(), None
 
     return cleaned, thinking_content
@@ -836,6 +836,19 @@ class LLMClient:
                     duration_ms,
                     log_file=log_file,
                     thinking=thinking_text or None,
+                )
+
+                # Generic usage telemetry — emits an 'llm_usage' event any plugin
+                # can observe. Never disturbs the LLM path (record_llm_usage swallows).
+                from backend.llm_usage_events import record_llm_usage
+                record_llm_usage(
+                    model=self._cached_model_name or self.model,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                    duration_ms=duration_ms,
+                    messages=messages,
+                    response_text=response_text,
                 )
 
                 return {

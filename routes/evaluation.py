@@ -68,6 +68,17 @@ def evaluate_two_pass_docs():
     return render_template('evaluate_doc.html', title='Two-Pass Evaluation', body=body)
 
 
+@evaluation_bp.route('/evaluate/docs/public-history')
+def evaluate_public_history_docs():
+    """Serve public history documentation."""
+    doc_path = os.path.join(_ROOT, 'docs', 'public-history.md')
+    if not os.path.isfile(doc_path):
+        abort(404)
+    with open(doc_path, encoding='utf-8') as f:
+        body = f.read()
+    return render_template('evaluate_doc.html', title='Public History — Implications & Guidance', body=body)
+
+
 @evaluation_bp.route('/evaluate')
 def evaluate():
     """LLM Evaluation runner page"""
@@ -222,7 +233,7 @@ def api_reset():
         }), 400
 
 
-@evaluation_bp.route('/api/test_matrix')
+@evaluation_bp.route('/api/evaluator/test_matrix')
 def api_test_matrix():
     """Get test matrix for current run"""
     run_id = request.args.get('run_id', type=int)
@@ -364,7 +375,7 @@ def api_summary(run_id):
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@evaluation_bp.route('/api/log_poll')
+@evaluation_bp.route('/api/evaluator/log_poll')
 def log_poll():
     """Poll for new log messages - returns batch of pending messages"""
     messages = []

@@ -423,7 +423,8 @@ def _producer_approval(ring: BoundedRing, breaker: CircuitBreaker,
 
 
 def _producer_chat(ring: BoundedRing, breaker: CircuitBreaker,
-                   stop_event: threading.Event, session_id: str):
+                   stop_event: threading.Event, session_id: str,
+                   after_seq: int = 0):
     """Producer: listen to per-session chat events."""
     from backend.event_stream import event_stream
 
@@ -494,7 +495,11 @@ def _producer_chat(ring: BoundedRing, breaker: CircuitBreaker,
             try:
                 payload = transform(data) if transform else data
                 if payload is not None:
-                    payload['seq'] = data.get('_seq')
+                    # Use the contiguous per-session chat seq (not the global _seq)
+                    # so the browser's gap detector sees a gap-free sequence and
+                    # doesn't fire a phantom gap-fill on every event. Matches the
+                    # legacy /chat/stream + /chat/events gap-fill endpoint.
+                    payload['seq'] = data.get('_chat_seq')
                     ring.put((sse_name, payload))
             except Exception:
                 pass
@@ -507,6 +512,35 @@ def _producer_chat(ring: BoundedRing, breaker: CircuitBreaker,
         event_stream.on(evt_name, h)
 
     event_stream.register_web_listener(session_id)
+
+    # Replay the in-progress session buffer so a client connecting at/after the
+    # POST that starts a turn still sees the turn's opening events (turn_begin,
+    # early thinking, first tool call). The legacy /chat/stream did this; without
+    # it the unified path loses those events and the UI shows only a spinner
+    # until a manual refresh. Subscribe-then-replay ordering (after event_stream.on
+    # above) means live events arriving during replay are also queued; the client
+    # dedups the overlap by the contiguous _chat_seq.
+    try:
+        buffered = event_stream.get_session_events(session_id, after_seq)
+        # On a fresh connect, drop everything up to and including the last
+        # completed turn / session_clear so we never replay a finished turn.
+        if after_seq == 0:
+            last_boundary = -1
+            for i, e in enumerate(buffered):
+                if e['event'] in ('turn_complete', 'session_clear'):
+                    last_boundary = i
+            if last_boundary >= 0:
+                buffered = buffered[last_boundary + 1:]
+        for entry in buffered:
+            st = _TRANSFORMS.get(entry['event'])
+            if not st:
+                continue
+            sse_name, transform = st
+            payload = transform(entry['data'])
+            payload['seq'] = entry.get('chat_seq')
+            ring.put((sse_name, payload))
+    except Exception:
+        pass
 
     try:
         while not stop_event.is_set():
@@ -617,6 +651,23 @@ class ChatThrottle:
         self._batch = []
         self._first_sent = False
         self._last_flush = 0
+        # Highest chat seq among batched chunks — stamped on the merged event so
+        # the client's _lastSeq advances over the chunks folded into the batch,
+        # avoiding a spurious gap-fill (and duplicate CoT) per batch boundary.
+        self._batch_seq = None
+
+    def _merged_thinking(self):
+        """Build the merged 'thinking' event from the current batch and reset it."""
+        batched_content = ''.join(self._batch)
+        self._batch = []
+        seq = self._batch_seq
+        self._batch_seq = None
+        if not batched_content:
+            return None
+        ev = {'content': batched_content}
+        if seq is not None:
+            ev['seq'] = seq
+        return ('thinking', ev)
 
     def feed(self, sse_name: str, payload: dict):
         """Feed a chat event. Returns list of events to emit now (may be empty)."""
@@ -630,23 +681,20 @@ class ChatThrottle:
                 return [('thinking', payload)]
 
             self._batch.append(payload.get('content', ''))
+            if payload.get('seq') is not None:
+                self._batch_seq = payload.get('seq')
 
             if (now_ms - self._last_flush) >= self.throttle_ms:
-                batched_content = ''.join(self._batch)
-                self._batch = []
                 self._last_flush = now_ms
-                if batched_content:
-                    return [('thinking', {'content': batched_content})]
-                return []
+                merged = self._merged_thinking()
+                return [merged] if merged else []
             return []
 
         # Non-thinking event: flush any pending batch first
         result = []
-        if self._batch:
-            batched_content = ''.join(self._batch)
-            self._batch = []
-            if batched_content:
-                result.append(('thinking', {'content': batched_content}))
+        merged = self._merged_thinking()
+        if merged:
+            result.append(merged)
 
         result.append((sse_name, payload))
         self._first_sent = False
@@ -654,13 +702,8 @@ class ChatThrottle:
 
     def flush(self):
         """Flush any remaining batched content. Returns list of events."""
-        result = []
-        if self._batch:
-            batched_content = ''.join(self._batch)
-            self._batch = []
-            if batched_content:
-                result.append(('thinking', {'content': batched_content}))
-        return result
+        merged = self._merged_thinking()
+        return [merged] if merged else []
 
 
 # ---------------------------------------------------------------------------
@@ -714,11 +757,33 @@ def api_realtime_stream():
             mimetype='application/json'
         )
 
+    # SSE connection limiting — max 5 concurrent per user/IP (FINDING-004)
+    from flask import session as _flask_session
+    from models.api_rate_limit import sse_register, sse_unregister, SSE_MAX_CONCURRENT
+    _sse_id = (
+        f"user:{_flask_session.get('_user_id', 'admin')}"
+        if _flask_session.get('authenticated')
+        else f"ip:{request.remote_addr or '0.0.0.0'}"
+    )
+    _sse_allowed, _sse_count = sse_register(_sse_id)
+    if not _sse_allowed:
+        return Response(
+            json.dumps({
+                'error': 'too_many_sse_connections',
+                'message': f'Maximum {SSE_MAX_CONCURRENT} concurrent SSE connections allowed.',
+                'retry_after': 30,
+            }),
+            status=429,
+            headers={'Retry-After': '30'},
+            mimetype='application/json'
+        )
+
     # Thundering herd mitigation — check approximate connection count
     with _conn_lock:
         conn_count = len(_connections)
     max_conn = int(os.environ.get('WORKER_CONNECTIONS', 512))
     if max_conn > 0 and conn_count >= max_conn * 0.8:
+        sse_unregister(_sse_id)
         return Response(
             json.dumps({'error': 'Server busy, please retry later'}),
             status=503,
@@ -784,7 +849,7 @@ def api_realtime_stream():
             t = threading.Thread(
                 target=_start_producer,
                 args=(ch, _producer_chat, rings[ch], breakers[ch],
-                      stop_event, {'session_id': session_id}),
+                      stop_event, {'session_id': session_id, 'after_seq': after_seq}),
                 daemon=True,
                 name=f"realtime-producer-{ch}-{conn_id[:12]}"
             )
@@ -955,6 +1020,9 @@ def api_realtime_stream():
             # Remove connection from registry
             with _conn_lock:
                 _connections.pop(conn_id, None)
+
+            # Unregister SSE connection (FINDING-004)
+            sse_unregister(_sse_id)
 
             # Check for circuit-breaker channel_disabled events
             for ch_name in all_channels:

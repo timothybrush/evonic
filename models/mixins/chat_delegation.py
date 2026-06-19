@@ -1,6 +1,6 @@
 import functools
 import os
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 import sqlite3
 
@@ -50,7 +50,7 @@ class ChatDelegationMixin:
         session_id = self._chat_db(_db_id).get_or_create_session(
             agent_id, external_user_id, channel_id, channel_type=channel_type)
         self._refresh_session_count(_db_id)
-        self._sync_session_index(_db_id, session_id)
+        self._sync_session_index(agent_id, session_id)
         return session_id
 
     def get_session_messages(self, session_id: str, limit: int = 50,
@@ -89,7 +89,7 @@ class ChatDelegationMixin:
                 pass
             # Keep session_index in sync (message_count, last_message, last_message_role, updated_at).
             # Only user/assistant messages to avoid write amplification from tool calls.
-            self._sync_session_index(_db_id, session_id)
+            self._sync_session_index(agent_id, session_id)
         return result
 
     def touch_agent_active(self, agent_id: str) -> None:
@@ -127,6 +127,16 @@ class ChatDelegationMixin:
             from models.chatlog import chatlog_manager
             chatlog_manager.get(agent_id, session_id).clear()
             self._remove_session_index(session_id)
+
+    def get_last_message_timestamp(self, session_id: str, agent_id: str = None) -> Optional[float]:
+        """Return the unix timestamp of the most recent message in a session.
+
+        Returns None if the session has no messages.
+        """
+        agent_id = agent_id or self._find_agent_for_session(session_id)
+        if not agent_id:
+            return None
+        return self._chat_db(agent_id).get_last_message_timestamp(session_id)
 
     def get_summary(self, session_id: str, agent_id: str = None):
         agent_id = agent_id or self._find_agent_for_session(session_id)
@@ -204,11 +214,11 @@ class ChatDelegationMixin:
             return None
         return self._chat_db(agent_id).get_latest_agent_request_metadata(session_id, sender_agent_id)
 
-    def get_session_messages_full(self, session_id: str, agent_id: str = None) -> List[Dict[str, Any]]:
+    def get_session_messages_full(self, session_id: str, agent_id: str = None, limit: int = 200, before_id: Optional[int] = None) -> Tuple[List[Dict[str, Any]], bool]:
         agent_id = agent_id or self._find_agent_for_session(session_id)
         if not agent_id:
-            return []
-        return self._chat_db(agent_id).get_session_messages_full(session_id)
+            return [], False
+        return self._chat_db(agent_id).get_session_messages_full(session_id, limit=limit, before_id=before_id)
 
     def get_new_messages(self, session_id: str, after_id: int, agent_id: str = None) -> List[Dict[str, Any]]:
         agent_id = agent_id or self._find_agent_for_session(session_id)

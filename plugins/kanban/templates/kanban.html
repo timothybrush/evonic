@@ -69,6 +69,30 @@ html.dark .drag-over { --tw-ring-color: rgb(99 102 241); background-color: rgb(4
     min-height: 4.5rem;
     resize: none;
 }
+
+/* Kanban skeleton loading cards */
+.kanban-skeleton { display: flex; flex-direction: column; gap: 0.5rem; }
+.kanban-error-state { display: none; }
+.kanban-error-state.show { display: flex; }
+.skeleton-card {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.5rem;
+    padding: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+html.dark .skeleton-card {
+    background: #374151;
+    border-color: #4b5563;
+}
+.skeleton-card .sk-title { height: 0.75rem; width: 75%; }
+.skeleton-card .sk-desc  { height: 0.625rem; width: 55%; }
+.skeleton-card .sk-meta  { height: 0.625rem; width: 40%; }
+.skeleton-card .sk-actions { display: flex; gap: 0.25rem; margin-top: 0.25rem; border-top: 1px solid #f3f4f6; padding-top: 0.5rem; }
+html.dark .skeleton-card .sk-actions { border-color: #4b5563; }
+.skeleton-card .sk-btn { height: 1.5rem; border-radius: 0.25rem; flex: 1; }
 </style>
 
 <!-- Board header -->
@@ -115,21 +139,39 @@ html.dark .drag-over { --tw-ring-color: rgb(99 102 241); background-color: rgb(4
             <span class="font-semibold text-gray-700 dark:text-gray-200">Todo</span>
             <span id="count-todo" class="text-xs bg-gray-100 text-gray-500 dark:bg-gray-600 dark:text-gray-100 rounded-full px-2 py-0.5">0</span>
         </div>
-        <div class="task-list flex flex-col gap-2 flex-1 min-h-[60px]" id="list-todo"></div>
+        <div class="task-list flex flex-col gap-2 flex-1 min-h-[60px]" id="list-todo">
+            <div class="kanban-skeleton" id="skel-todo">
+                <div class="skeleton-card"><div class="skeleton-line sk-title"></div><div class="skeleton-line sk-desc"></div><div class="skeleton-line sk-meta"></div><div class="sk-actions"><div class="skeleton-line sk-btn"></div><div class="skeleton-line sk-btn"></div></div></div>
+                <div class="skeleton-card"><div class="skeleton-line sk-title"></div><div class="skeleton-line sk-desc"></div><div class="skeleton-line sk-meta"></div><div class="sk-actions"><div class="skeleton-line sk-btn"></div><div class="skeleton-line sk-btn"></div></div></div>
+                <div class="skeleton-card"><div class="skeleton-line sk-title"></div><div class="skeleton-line sk-desc"></div><div class="skeleton-line sk-meta"></div><div class="sk-actions"><div class="skeleton-line sk-btn"></div><div class="skeleton-line sk-btn"></div></div></div>
+                <div class="skeleton-card"><div class="skeleton-line sk-title"></div><div class="skeleton-line sk-desc"></div><div class="skeleton-line sk-meta"></div><div class="sk-actions"><div class="skeleton-line sk-btn"></div><div class="skeleton-line sk-btn"></div></div></div>
+            </div>
+        </div>
     </div>
     <div class="flex-1 min-w-[280px]  dark:bg-gray-800 bg-gray-200 rounded-xl p-4 flex flex-col border border-gray-500" data-status="in-progress">
         <div class="flex items-center gap-2 mb-3">
             <span class="font-semibold text-gray-700 dark:text-gray-200">In Progress</span>
             <span id="count-in-progress" class="text-xs bg-gray-100 text-gray-500 dark:bg-gray-600 dark:text-gray-100 rounded-full px-2 py-0.5">0</span>
         </div>
-        <div class="task-list flex flex-col gap-2 flex-1 min-h-[60px]" id="list-in-progress"></div>
+        <div class="task-list flex flex-col gap-2 flex-1 min-h-[60px]" id="list-in-progress">
+            <div class="kanban-skeleton" id="skel-in-progress">
+                <div class="skeleton-card"><div class="skeleton-line sk-title"></div><div class="skeleton-line sk-desc"></div><div class="skeleton-line sk-meta"></div><div class="sk-actions"><div class="skeleton-line sk-btn"></div><div class="skeleton-line sk-btn"></div></div></div>
+                <div class="skeleton-card"><div class="skeleton-line sk-title"></div><div class="skeleton-line sk-desc"></div><div class="skeleton-line sk-meta"></div><div class="sk-actions"><div class="skeleton-line sk-btn"></div><div class="skeleton-line sk-btn"></div></div></div>
+            </div>
+        </div>
     </div>
     <div class="flex-1 min-w-[280px] bg-gray-200 dark:bg-gray-800 rounded-xl p-4 flex flex-col border border-gray-500" data-status="done">
         <div class="flex items-center gap-2 mb-3">
             <span class="font-semibold text-gray-700 dark:text-gray-200">Done</span>
             <span id="count-done" class="text-xs bg-gray-100 text-gray-500 dark:bg-gray-600 dark:text-gray-100 rounded-full px-2 py-0.5">0</span>
         </div>
-        <div class="task-list flex flex-col gap-2 flex-1 min-h-[60px]" id="list-done"></div>
+        <div class="task-list flex flex-col gap-2 flex-1 min-h-[60px]" id="list-done">
+            <div class="kanban-skeleton" id="skel-done">
+                <div class="skeleton-card"><div class="skeleton-line sk-title"></div><div class="skeleton-line sk-desc"></div><div class="skeleton-line sk-meta"></div><div class="sk-actions"><div class="skeleton-line sk-btn"></div><div class="skeleton-line sk-btn"></div></div></div>
+                <div class="skeleton-card"><div class="skeleton-line sk-title"></div><div class="skeleton-line sk-desc"></div><div class="skeleton-line sk-meta"></div><div class="sk-actions"><div class="skeleton-line sk-btn"></div><div class="skeleton-line sk-btn"></div></div></div>
+                <div class="skeleton-card"><div class="skeleton-line sk-title"></div><div class="skeleton-line sk-desc"></div><div class="skeleton-line sk-meta"></div><div class="sk-actions"><div class="skeleton-line sk-btn"></div><div class="skeleton-line sk-btn"></div></div></div>
+            </div>
+        </div>
     </div>
     <div class="flex-1 min-w-[280px] dark:bg-gray-800 bg-gray-200 rounded-xl p-4 flex flex-col border border-gray-500" data-status="archived">
         <div class="flex items-center justify-between mb-3">
@@ -142,8 +184,22 @@ html.dark .drag-over { --tw-ring-color: rgb(99 102 241); background-color: rgb(4
             </div>
             <button onclick="clearAllArchived()" class="text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 font-medium underline">Clear All</button>
         </div>
-        <div class="task-list flex flex-col gap-2 flex-1 min-h-[60px]" id="list-archived"></div>
+        <div class="task-list flex flex-col gap-2 flex-1 min-h-[60px]" id="list-archived">
+            <div class="kanban-skeleton" id="skel-archived">
+                <div class="skeleton-card"><div class="skeleton-line sk-title"></div><div class="skeleton-line sk-desc"></div><div class="skeleton-line sk-meta"></div><div class="sk-actions"><div class="skeleton-line sk-btn"></div><div class="skeleton-line sk-btn"></div></div></div>
+                <div class="skeleton-card"><div class="skeleton-line sk-title"></div><div class="skeleton-line sk-desc"></div><div class="skeleton-line sk-meta"></div><div class="sk-actions"><div class="skeleton-line sk-btn"></div><div class="skeleton-line sk-btn"></div></div></div>
+            </div>
+        </div>
     </div>
+</div>
+
+<!-- Error state banner (hidden initially, shown on fetch failure) -->
+<div id="kanban-error-banner" class="kanban-error-state mx-6 mb-4 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl items-center justify-between gap-3">
+    <div class="flex items-center gap-3">
+        <svg class="w-5 h-5 text-red-500 dark:text-red-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+        <span class="text-sm text-red-700 dark:text-red-300">Failed to load tasks. Please check your connection.</span>
+    </div>
+    <button onclick="loadTasks()" class="shrink-0 px-3 py-1.5 text-xs font-medium text-red-700 dark:text-red-300 bg-red-100 dark:bg-red-900/40 hover:bg-red-200 dark:hover:bg-red-900/60 rounded-lg transition">Retry</button>
 </div>
 
 <!-- Create/Edit Modal -->
@@ -538,11 +594,28 @@ html.dark .drag-over { --tw-ring-color: rgb(99 102 241); background-color: rgb(4
         }
     }
 
+    function hideKanbanSkeleton() {
+        document.querySelectorAll('.kanban-skeleton').forEach(function(el) { el.style.display = 'none'; });
+    }
+
+    function showKanbanError() {
+        hideKanbanSkeleton();
+        var banner = document.getElementById('kanban-error-banner');
+        if (banner) banner.classList.add('show');
+    }
+
+    function hideKanbanError() {
+        var banner = document.getElementById('kanban-error-banner');
+        if (banner) banner.classList.remove('show');
+    }
+
     function loadTasks(callback) {
         if (loadTasksInFlight) return;
         loadTasksInFlight = true;
         $.get(`${API}/tasks`, function(data) {
             loadTasksInFlight = false;
+            hideKanbanSkeleton();
+            hideKanbanError();
             const newTasks = data.tasks || [];
             const newFP = computeTasksFingerprint(newTasks);
             tasks = newTasks;
@@ -553,6 +626,8 @@ html.dark .drag-over { --tw-ring-color: rgb(99 102 241); background-color: rgb(4
             if (typeof callback === 'function') callback();
         }).fail(function() {
             loadTasksInFlight = false;
+            hideKanbanSkeleton();
+            showKanbanError();
             console.error('Failed to load tasks');
         });
     }
@@ -623,6 +698,7 @@ html.dark .drag-over { --tw-ring-color: rgb(99 102 241); background-color: rgb(4
         const moveButtons = getMoveButtons(task);
         const initials = task.assignee ? esc(task.assignee).split(/[\s._-]+/).filter(Boolean).map(s => s[0].toUpperCase()).slice(0, 2).join('') : '';
         const hasAssignee = !!(task.assignee);
+        const hasAvatar = hasAgentAvatar(task.assignee);
         const nUrl = task.assignee ? `/api/agents/${esc(task.assignee)}/avatar` : '';
         const agentTitle = task.assignee ? esc(getAgentName(task.assignee)) : '';
         const rocketBtn = task.status === 'todo' ? `<button class="text-[10px] px-1.5 py-0.5 rounded bg-orange-100 dark:bg-orange-900/40 text-orange-600 dark:text-orange-400 hover:bg-orange-200 dark:hover:bg-orange-900/50 transition" title="Trigger agent" onclick="handleTrigger(${task.id}, ${hasAssignee}, event)">🚀</button>` : '';
@@ -635,7 +711,10 @@ html.dark .drag-over { --tw-ring-color: rgb(99 102 241); background-color: rgb(4
                 <span class="text-[10px] font-semibold uppercase rounded px-1.5 py-0.5 ${pBadge}">${esc(task.priority || 'low')}</span>
                 ${rocketBtn}
                 ${(task.status === 'in-progress' || (task.status === 'done' && task.started_at)) ? `<span class="flex items-center gap-1 text-[10px] text-indigo-500 dark:text-indigo-400 mx-auto"><svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>${fmtDuration(task)}</span>` : ''}
-                ${task.assignee ? `<span class="ml-auto inline-flex items-center gap-0"><img src="${nUrl}" alt="" class="w-5 h-5 rounded-full object-cover" title="${agentTitle}" onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='inline-flex'"><span class="hidden items-center justify-center w-5 h-5 rounded-full text-[9px] font-semibold ${task.assignee === SUPER_AGENT_ID ? 'bg-red-100 dark:bg-red-900/50 text-red-600 dark:text-red-400' : 'bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300'}" title="${agentTitle}">${initials}</span></span>` : ''}
+                ${task.assignee ? (hasAvatar
+                    ? `<span class="ml-auto inline-flex items-center gap-0"><img src="${nUrl}" alt="" class="w-5 h-5 rounded-full object-cover" title="${agentTitle}" onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='inline-flex'"><span class="hidden items-center justify-center w-5 h-5 rounded-full text-[9px] font-semibold ${task.assignee === SUPER_AGENT_ID ? 'bg-red-100 dark:bg-red-900/50 text-red-600 dark:text-red-400' : 'bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300'}" title="${agentTitle}">${initials}</span></span>`
+                    : `<span class="ml-auto inline-flex items-center justify-center w-5 h-5 rounded-full text-[9px] font-semibold ${task.assignee === SUPER_AGENT_ID ? 'bg-red-100 dark:bg-red-900/50 text-red-600 dark:text-red-400' : 'bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300'}" title="${agentTitle}">${initials}</span>`
+                ) : ''}
             </div>
             <div class="flex gap-1 pt-1.5 border-t border-gray-100 dark:border-gray-700 flex-wrap">
                 ${moveButtons}
@@ -1465,34 +1544,30 @@ html.dark .drag-over { --tw-ring-color: rgb(99 102 241); background-color: rgb(4
         $('#trigger-loading').show();
         $('#trigger-agent-list, #trigger-actions, #trigger-no-agents').addClass('hidden');
 
-        const now = Date.now();
-        if (!_agentCache || (now - _agentCacheTime) > 60000) {
-            $.get('/api/kanban/eligible-agents', function(data) {
-                _agentCache = (data.agents || []).map(a => ({id: a.id, name: a.name || a.id}));
-                _agentCacheTime = now;
-                _renderTriggerAgents();
-            }).fail(function() {
-                _agentCache = [];
-                _agentCacheTime = now;
-                _renderTriggerAgents();
-            });
-        } else {
+        // Always fetch eligible agents (separate from main agent cache)
+        $.get('/api/kanban/eligible-agents', function(data) {
+            _triggerAgents = (data.agents || []).map(a => ({id: a.id, name: a.name || a.id, avatar_path: a.avatar_path}));
             _renderTriggerAgents();
-        }
+        }).fail(function() {
+            _triggerAgents = [];
+            _renderTriggerAgents();
+        });
     }
 
     function _renderTriggerAgents() {
         $('#trigger-loading').hide();
-        if (!_agentCache || !_agentCache.length) {
+        if (!_triggerAgents || !_triggerAgents.length) {
             $('#trigger-no-agents').removeClass('hidden');
             return;
         }
 
-        _triggerAgents = _agentCache;
         const html = _triggerAgents.map(function(agent) {
-            const avatarUrl = `/api/agents/${esc(agent.id)}/avatar`;
-            const fallbackSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none"><rect width="40" height="40" rx="20" fill="#e0e7ff"/><path d="M20 8a5 5 0 100 10 5 5 0 000-10zm-8 18.5a8 8 0 0116 0" fill="#4f46e5"/></svg>`;
-            return `<button onclick="selectTriggerAgent('${esc(agent.id)}')" class="flex flex-col items-center gap-2 p-3 rounded-lg border border-gray-200 dark:border-gray-600 dark:bg-gray-700 hover:bg-orange-50 hover:border-orange-200 dark:hover:bg-gray-600 dark:hover:border-orange-400 transition ${_triggerAgent === agent.id ? 'bg-orange-100 border-orange-400 dark:bg-orange-900 dark:border-orange-400' : ''}"><img src="${avatarUrl}" alt="${esc(agent.name)}" class="w-12 h-12 rounded-full object-cover bg-indigo-50 dark:bg-indigo-900/20" onerror="this.onerror=null;this.src='data:image/svg+xml,${encodeURIComponent(fallbackSvg)}'"><span class="text-xs text-gray-700 dark:text-gray-200 font-medium break-words text-center leading-tight">${esc(agent.name)}</span></button>`;
+            const initials = esc(agent.name).split(/[\s._-]+/).filter(Boolean).map(s => s[0].toUpperCase()).slice(0, 2).join('');
+            const hasAvatar = !!(agent.avatar_path);
+            const avatarHtml = hasAvatar
+                ? `<img src="/api/agents/${esc(agent.id)}/avatar" alt="${esc(agent.name)}" class="w-12 h-12 rounded-full object-cover bg-indigo-50 dark:bg-indigo-900/20" onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='inline-flex'"><span class="hidden items-center justify-center w-12 h-12 rounded-full text-sm font-semibold bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300">${initials}</span>`
+                : `<span class="inline-flex items-center justify-center w-12 h-12 rounded-full text-sm font-semibold bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300">${initials}</span>`;
+            return `<button onclick="selectTriggerAgent('${esc(agent.id)}')" class="flex flex-col items-center gap-2 p-3 rounded-lg border border-gray-200 dark:border-gray-600 dark:bg-gray-700 hover:bg-orange-50 hover:border-orange-200 dark:hover:bg-gray-600 dark:hover:border-orange-400 transition ${_triggerAgent === agent.id ? 'bg-orange-100 border-orange-400 dark:bg-orange-900 dark:border-orange-400' : ''}">${avatarHtml}<span class="text-xs text-gray-700 dark:text-gray-200 font-medium break-words text-center leading-tight">${esc(agent.name)}</span></button>`;
         }).join('');
 
         $('#trigger-agent-list').html(html);
@@ -1641,11 +1716,28 @@ html.dark .drag-over { --tw-ring-color: rgb(99 102 241); background-color: rgb(4
     let _agentCache = null;
     let _agentCacheTime = 0;
 
+    function preloadAgentCache(callback) {
+        const now = Date.now();
+        if (_agentCache && (now - _agentCacheTime) < 60000) {
+            if (callback) callback();
+            return;
+        }
+        $.get('/api/kanban/all-agents', function(data) {
+            _agentCache = (data.agents || []).map(a => ({id: a.id, name: a.name || a.id, has_kanban: a.has_kanban, avatar_path: a.avatar_path}));
+            _agentCacheTime = now;
+            if (callback) callback();
+        }).fail(function() {
+            _agentCache = [];
+            _agentCacheTime = now;
+            if (callback) callback();
+        });
+    }
+
     function populateAgentSelect(selector, selectedValue) {
         const now = Date.now();
         if (!_agentCache || (now - _agentCacheTime) > 60000) {
             $.get('/api/kanban/all-agents', function(data) {
-                _agentCache = (data.agents || []).map(a => ({id: a.id, name: a.name || a.id, has_kanban: a.has_kanban}));
+                _agentCache = (data.agents || []).map(a => ({id: a.id, name: a.name || a.id, has_kanban: a.has_kanban, avatar_path: a.avatar_path}));
                 _agentCacheTime = now;
                 _doPopulateAgentSelect(selector, selectedValue);
             }).fail(function() {
@@ -1662,6 +1754,12 @@ html.dark .drag-over { --tw-ring-color: rgb(99 102 241); background-color: rgb(4
         if (!agentId || !_agentCache) return agentId || '';
         const agent = _agentCache.find(a => a.id === agentId);
         return agent ? agent.name : agentId;
+    }
+
+    function hasAgentAvatar(agentId) {
+        if (!agentId || !_agentCache) return false;
+        const agent = _agentCache.find(a => a.id === agentId);
+        return !!(agent && agent.avatar_path);
     }
 
     function showAgentSkillWarning(selectId, warningId) {
@@ -1681,14 +1779,14 @@ html.dark .drag-over { --tw-ring-color: rgb(99 102 241); background-color: rgb(4
     function renderAssigneeWithAvatar(assignee) {
         if (!assignee) return '—';
         const agentName = getAgentName(assignee);
-        const avatarUrl = `/api/agents/${esc(assignee)}/avatar`;
         const initials = esc(assignee).split(/[\s._-]+/).filter(Boolean).map(s => s[0].toUpperCase()).slice(0, 2).join('');
         const isSuper = assignee === SUPER_AGENT_ID;
+        const hasAvatar = hasAgentAvatar(assignee);
+        const avatarHtml = hasAvatar
+            ? `<div class="relative inline-flex"><img src="/api/agents/${esc(assignee)}/avatar" alt="" class="w-10 h-10 rounded-full object-cover" title="${esc(assignee)}" onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='inline-flex'"><span class="hidden items-center justify-center w-10 h-10 rounded-full text-xs font-semibold ${isSuper ? 'bg-red-100 dark:bg-red-900/50 text-red-600 dark:text-red-400' : 'bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300'}" title="${esc(assignee)}">${initials}</span></div>`
+            : `<span class="inline-flex items-center justify-center w-10 h-10 rounded-full text-xs font-semibold ${isSuper ? 'bg-red-100 dark:bg-red-900/50 text-red-600 dark:text-red-400' : 'bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300'}" title="${esc(assignee)}">${initials}</span>`;
         return `<div class="flex flex-col items-start gap-1">
-            <div class="relative inline-flex">
-                <img src="${avatarUrl}" alt="" class="w-10 h-10 rounded-full object-cover" title="${esc(assignee)}" onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='inline-flex'">
-                <span class="hidden items-center justify-center w-10 h-10 rounded-full text-xs font-semibold ${isSuper ? 'bg-red-100 dark:bg-red-900/50 text-red-600 dark:text-red-400' : 'bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300'}" title="${esc(assignee)}">${initials}</span>
-            </div>
+            ${avatarHtml}
             <span class="text-xs ${isSuper ? 'text-red-500 dark:text-red-400 font-semibold' : 'text-gray-600 dark:text-gray-400'}">${esc(agentName)}</span>
         </div>`;
     }
@@ -1826,6 +1924,8 @@ html.dark .drag-over { --tw-ring-color: rgb(99 102 241); background-color: rgb(4
     });
 
     fetchNotifierStatus();
-    loadTasks();
+    preloadAgentCache(function() {
+        loadTasks();
+    });
 </script>
 {% endblock %}

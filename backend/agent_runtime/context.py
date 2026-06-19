@@ -642,6 +642,11 @@ def _build_static_prompt(agent: Dict[str, Any]) -> str:
         f"- `/_self/plan/` — your plan files\n"
         f"- `/_self/artifacts/` — your artifacts directory"
     )
+    parts.append(
+        "**Important**: `/_self/` paths only work with file tools "
+        "(`read_file`, `write_file`, `patch`, `str_replace`) — "
+        "NOT with `bash` or `runpy`."
+    )
 
     # Inform agents about portal virtual paths configured for them
     _portal_lines = _build_portal_info(eid)
@@ -736,7 +741,7 @@ def _cache_key_valid(agent: Dict[str, Any], cache_entry: Dict[str, Any]) -> bool
     return True
 
 
-def build_system_prompt(agent: Dict[str, Any]) -> str:
+def build_system_prompt(agent: Dict[str, Any], injected_system_vars: Dict[str, str] = None) -> str:
     """Build the system prompt including tool injections and KB file listing.
 
     The static portion (SYSTEM.md, KB files, skills) is cached per-agent and
@@ -779,6 +784,14 @@ def build_system_prompt(agent: Dict[str, Any]) -> str:
         }
 
     prompt = static_prompt
+
+    # Expand injected system vars (session-scoped, after cache)
+    if injected_system_vars is None:
+        injected_system_vars = agent.get('injected_system_vars')
+    if injected_system_vars:
+        for key, value in injected_system_vars.items():
+            placeholder = '{{' + key + '}}'
+            prompt = prompt.replace(placeholder, str(value))
 
     # Onboarding injection for super agent (one-time, until owner name is known).
     # Once set_owner_name is called, defaults/super_agent_system_prompt.md is copied
@@ -866,13 +879,27 @@ def build_system_prompt(agent: Dict[str, Any]) -> str:
         ("/help", "Show available commands"),
         ("/summary", "Force regenerate session summary"),
         ("/stop", "Stop the agent's current processing loop"),
+        ("/detach", "Move the running long-running process (build/download) to the background so we can keep chatting — tracking is persistent (survives restarts) and you'll be notified to report the result when it finishes; the watcher is removed automatically, no cleanup needed"),
+        ("/jobs", "List background jobs for this session"),
     ]
     slash_commands.append(("/plan", "Switch to plan mode"))
     slash_commands.append(("/unfocus", "Force-clear focus mode — use when agent is stuck in focus after a failed task"))
-    if is_super:
-        slash_commands.append(("/restart", "Restart the service (super agent only)"))
+    # /cd and /cwd are available to super agents and agents with remote/tunnel workplaces
+    has_remote_workplace = False
+    if not is_super:
+        workplace_id = agent.get('workplace_id')
+        if workplace_id:
+            try:
+                workplace = db.get_workplace(workplace_id)
+                if workplace and workplace.get('type') in ('remote', 'tunnel'):
+                    has_remote_workplace = True
+            except Exception:
+                pass
+    if is_super or has_remote_workplace:
         slash_commands.append(("/cwd", "Show current workspace directory"))
         slash_commands.append(("/cd", "Change workspace directory"))
+    if is_super:
+        slash_commands.append(("/restart", "Restart the service (super agent only)"))
         slash_commands.append(("/shutdown", "Shut down the Evonic server completely (super agent only)"))
     # /autopilot is not yet implemented, omit from listing
 
@@ -920,7 +947,8 @@ def build_tools(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Build the OpenAI function tool list for this agent."""
     tools = []
 
-    # Always include built-in tools (read, etc.)
+    # Built-in tools (read, use_skill, set_mode, remember, recall, etc.)
+    # Can be disabled per-agent via builtin_tools_enabled advanced setting.
     # Pass workplace_id so built-in factories can tailor descriptions for remote agents
     # (e.g. read() tool mentions /_self/kb/ when workplace_id is set).
     agent_context = {
@@ -928,7 +956,8 @@ def build_tools(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
         'is_super': bool(agent.get('is_super')),
         'workplace_id': agent.get('workplace_id'),
     }
-    tools.extend(tool_registry.get_builtin_tools(agent_context))
+    if agent.get('builtin_tools_enabled', True):
+        tools.extend(tool_registry.get_builtin_tools(agent_context))
 
     # Super agent gets its own administrative built-in tools
     if agent.get('is_super'):
@@ -1136,9 +1165,10 @@ def build_message_entry(msg: dict, agent: dict) -> dict:
     msg_image = _msg_meta.get('image_url') if _msg_meta else None
     msg_audio = _msg_meta.get('audio_url') if _msg_meta else None
     msg_video = _msg_meta.get('video_url') if _msg_meta else None
-    has_image = msg_image and agent.get('vision_enabled')
+    # Images are NEVER auto-fed to the main LLM — always use the describe_image tool instead.
     has_audio = msg_audio and agent.get('audio_enabled')
     has_video = msg_video and agent.get('video_enabled')
+    has_image_attachment = msg_image is not None  # track for attachment note enhancement
 
     # Build attachment context note if attachment_info is present in metadata
     attachment_info = _msg_meta.get('attachment_info') if _msg_meta else None
@@ -1154,20 +1184,27 @@ def build_message_entry(msg: dict, agent: dict) -> dict:
             size_str = f"{size_bytes / 1024:.1f} KB"
         else:
             size_str = f"{size_bytes} B"
-        attachment_note = (
-            f"\n\n[Attachment: {filename} ({mime_type}, {size_str})]"
-            f"\nFile path: {file_path}"
-        )
+        is_image = mime_type and mime_type.startswith("image/")
+        if is_image and has_image_attachment:
+            attachment_note = (
+                f"\n\n[Attachment: {filename} ({mime_type}, {size_str})]"
+                f"\nFile path: {file_path}"
+                "\nUse the `describe_image` tool to view and analyze this image."
+            )
+        else:
+            attachment_note = (
+                f"\n\n[Attachment: {filename} ({mime_type}, {size_str})]"
+                f"\nFile path: {file_path}"
+            )
 
-    if has_image or has_audio or has_video:
+    if has_audio or has_video:
         parts = []
         text_content = msg.get('content', '')
         if attachment_note:
             text_content = text_content.rstrip() + attachment_note
         if text_content and text_content not in ('[Image]', '[Audio]', '[Video]'):
             parts.append({"type": "text", "text": text_content})
-        if has_image:
-            parts.append({"type": "image_url", "image_url": {"url": msg_image}})
+        # NOTE: Images are never auto-fed — use describe_image tool instead.
         if has_audio:
             if msg_audio.startswith("data:"):
                 try:

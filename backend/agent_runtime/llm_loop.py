@@ -70,6 +70,77 @@ def _count_tokens(text: str) -> int:
         return len(text) // 4
 
 
+def _sanitize_tool_call_pairs(messages: List[Dict[str, Any]]) -> bool:
+    """Repair orphaned tool_calls / tool messages in-place before sending to the API.
+
+    The provider rejects (HTTP 400) any history where an assistant message with
+    `tool_calls` is not immediately followed by a `tool` response for every
+    `tool_call_id`, or where a `tool` message has no declaring assistant. This can
+    slip through history reconstruction (SQLite-fallback path, prefetch, or live
+    edge cases). Mirror the proven repair in models/chatlog.py:
+
+    1. Inject a synthetic error `tool` response for any declared tool_call_id that
+       has no matching response.
+    2. Drop `tool` messages whose tool_call_id was never declared (orphaned) or is
+       a duplicate response.
+
+    Idempotent — a no-op on well-formed histories. Returns True if it changed
+    `messages`, so callers can gate a retry on "something was actually repaired".
+    """
+    repaired = False
+    out: List[Dict[str, Any]] = []
+    i = 0
+    n = len(messages)
+    declared_ids: set = set()
+    responded_ids: set = set()
+    while i < n:
+        msg = messages[i]
+        if msg.get('role') == 'assistant' and msg.get('tool_calls'):
+            tc_ids = [tc.get('id') for tc in msg.get('tool_calls', []) if tc.get('id')]
+            declared_ids.update(tc_ids)
+            out.append(msg)
+            # Collect the contiguous run of tool responses that follow.
+            j = i + 1
+            seen_here: set = set()
+            while j < n and messages[j].get('role') == 'tool':
+                _tcid = messages[j].get('tool_call_id', '')
+                if _tcid in tc_ids and _tcid not in seen_here and _tcid not in responded_ids:
+                    seen_here.add(_tcid)
+                    responded_ids.add(_tcid)
+                    out.append(messages[j])
+                else:
+                    # Orphaned or duplicate tool response — drop it.
+                    repaired = True
+                j += 1
+            # Inject synthetic responses for any tool_call_id left unanswered.
+            for _mid in tc_ids:
+                if _mid not in seen_here:
+                    out.append({
+                        'role': 'tool',
+                        'tool_call_id': _mid,
+                        'content': '{"error": "Tool execution was interrupted before completion."}',
+                    })
+                    responded_ids.add(_mid)
+                    repaired = True
+            i = j
+        elif msg.get('role') == 'tool':
+            # A tool message not immediately preceded by its declaring assistant.
+            _tcid = msg.get('tool_call_id', '')
+            if _tcid in declared_ids and _tcid not in responded_ids:
+                responded_ids.add(_tcid)
+                out.append(msg)
+            else:
+                repaired = True  # orphaned or duplicate — drop
+            i += 1
+        else:
+            out.append(msg)
+            i += 1
+
+    if repaired:
+        messages[:] = out
+    return repaired
+
+
 def _persist_agent_state_split(ms, agent_id, session_id, db_agent_id=None):
     """Persist agent state, splitting per-session vs global fields.
 
@@ -164,17 +235,23 @@ def run_tool_loop(agent: Dict[str, Any],
     chatlog.append({'type': 'turn_begin', 'session_id': session_id, 'ts': _loop_ts})
     event_stream.emit('turn_begin', {'session_id': session_id, 'ts': _loop_ts})
 
-    builtin_exec = tool_registry.get_builtin_executor(agent_context)
     real_exec = tool_registry.get_real_executor(agent_context)
 
-    # Chain-of-responsibility: collect executors in order, iterate until one returns non-None
-    _builtin_chain = [builtin_exec]
-    if agent_context.get('is_super'):
-        from backend.tools.super_agent_tools import get_super_agent_executor
-        _builtin_chain.append(get_super_agent_executor(agent_context))
-    if agent_context.get('is_super') or agent_context.get('agent_messaging_enabled'):
-        from backend.tools.agent_messaging import get_agent_messaging_executor
-        _builtin_chain.append(get_agent_messaging_executor(agent_context))
+    # Built-in tool executors (read, use_skill, set_mode, remember, recall, etc.)
+    # When builtin_tools_enabled is False, skip all built-in executors entirely.
+    if agent.get('builtin_tools_enabled', True):
+        builtin_exec = tool_registry.get_builtin_executor(agent_context)
+
+        # Chain-of-responsibility: collect executors in order, iterate until one returns non-None
+        _builtin_chain = [builtin_exec]
+        if agent_context.get('is_super'):
+            from backend.tools.super_agent_tools import get_super_agent_executor
+            _builtin_chain.append(get_super_agent_executor(agent_context))
+        if agent_context.get('is_super') or agent_context.get('agent_messaging_enabled'):
+            from backend.tools.agent_messaging import get_agent_messaging_executor
+            _builtin_chain.append(get_agent_messaging_executor(agent_context))
+    else:
+        _builtin_chain = []
 
     def builtin_exec(fn_name, args):
         for _exec in _builtin_chain:
@@ -563,6 +640,13 @@ def run_tool_loop(agent: Dict[str, Any],
                                 "INJECTION_MESSAGE agent=%s severity=%s score=%d rule=%s",
                                 agent_id, _sev, _score_pct, _rule,
                             )
+
+        # Repair any orphaned tool_calls/tool messages before sending. Prevents the
+        # provider 400 ("assistant message with tool_calls must be followed by tool
+        # messages") that slips through history reconstruction on some paths.
+        # Idempotent → no-op on well-formed histories.
+        if _sanitize_tool_call_pairs(messages):
+            _logger.warning("Repaired orphaned tool_call/tool pairs before LLM call (session=%s)", session_id)
 
         # LOCK ORDERING: Main path — llm_lock only. No other locks held here.
         # Keep thinking enabled unless the thinking budget was exceeded, in which
@@ -963,6 +1047,15 @@ def run_tool_loop(agent: Dict[str, Any],
                 chatlog.append({'type': 'error', 'session_id': session_id, 'content': error_msg,
                                 'metadata': {'error': True, 'thinking_duration': _err_dur}})
                 chatlog.append({'type': 'turn_end', 'session_id': session_id, 'thinking_duration': _err_dur})
+                # Emit final_answer so downstream consumers (e.g. sub-agent → parent
+                # auto-forward) still fire on the error path, mirroring the success
+                # and stop exit paths.
+                event_stream.emit('final_answer', {
+                    'agent_id': agent_id, 'session_id': session_id,
+                    'external_user_id': external_user_id, 'channel_id': channel_id,
+                    'answer': error_msg, 'tool_trace': tool_trace, 'timeline': timeline,
+                    'error': True,
+                })
                 return {"text": error_msg, "error": True}, tool_trace, timeline
 
         choice = result['response'].get('choices', [{}])[0]
@@ -970,6 +1063,21 @@ def run_tool_loop(agent: Dict[str, Any],
         raw_content = msg.get('content', '')
         reasoning_content = msg.get('reasoning_content') or msg.get('reasoning')
         tool_calls = msg.get('tool_calls')
+
+        # Fallback: parse Gemma4's native <|tool_call> pipe-delimited format
+        # BEFORE checking for Qwen XML format. Gemma4's <|tool_call> contains
+        # the <tool_call> substring, so it must be checked first to prevent
+        # false routing to the Qwen parser and corrupting parameters.
+        if not tool_calls and raw_content and '<|tool_call>' in raw_content:
+            from evaluator.gemma4_parser import (
+                extract_gemma4_tool_calls,
+                gemma4_tool_calls_to_openai_format,
+                extract_gemma4_content,
+            )
+            gemma4_calls = extract_gemma4_tool_calls(raw_content)
+            if gemma4_calls:
+                tool_calls = gemma4_tool_calls_to_openai_format(gemma4_calls)
+                raw_content = extract_gemma4_content(raw_content)
 
         # Fallback: parse Qwen's native <tool_call> XML format when the model
         # doesn't return structured tool_calls in the OpenAI response field.
@@ -1061,17 +1169,24 @@ def run_tool_loop(agent: Dict[str, Any],
                 continue
 
         # Fallback: recover tool calls from thinking/CoT content.
-        # Covers the case where the model emits <tool_call> XML inside <think> tags
-        # or in the separate reasoning_content field (llama.cpp --reasoning mode)
-        # instead of in the main response body.
+        # Handles models that emit tool calls inside thinking blocks instead
+        # of the main response body. Check Gemma4 pipe-delimited format first
+        # to avoid the <tool_call> substring matching Qwen's XML parser.
         if not tool_calls:
             cot_text = reasoning_text or thinking
-            if cot_text and '<tool_call>' in cot_text:
-                from evaluator.qwen_parser import extract_qwen_tool_calls, qwen_tool_calls_to_openai_format
-                cot_calls = extract_qwen_tool_calls(cot_text)
-                if cot_calls:
-                    tool_calls = qwen_tool_calls_to_openai_format(cot_calls)
-                    _logger.debug("Recovered %d tool call(s) from thinking/CoT content", len(tool_calls))
+            if cot_text:
+                if '<|tool_call>' in cot_text:
+                    from evaluator.gemma4_parser import extract_gemma4_tool_calls, gemma4_tool_calls_to_openai_format
+                    cot_calls = extract_gemma4_tool_calls(cot_text)
+                    if cot_calls:
+                        tool_calls = gemma4_tool_calls_to_openai_format(cot_calls)
+                        _logger.debug("Recovered %d Gemma4 tool call(s) from thinking/CoT content", len(tool_calls))
+                elif '<tool_call>' in cot_text:
+                    from evaluator.qwen_parser import extract_qwen_tool_calls, qwen_tool_calls_to_openai_format
+                    cot_calls = extract_qwen_tool_calls(cot_text)
+                    if cot_calls:
+                        tool_calls = qwen_tool_calls_to_openai_format(cot_calls)
+                        _logger.debug("Recovered %d Qwen tool call(s) from thinking/CoT content", len(tool_calls))
 
         # --- Output Parser: detect malformed tool calls embedded in text ---
         # If the model produced no native tool_calls but its text contains
@@ -1193,13 +1308,26 @@ def run_tool_loop(agent: Dict[str, Any],
                 meta = meta or {}
                 meta['reasoning_content'] = reasoning_text
             _final_dur = round(time.time() - _loop_start_time, 1)
-            if content:
-                db.add_chat_message(session_id, 'assistant', content, agent_id=db_agent_id, metadata=meta)
-                _cl_meta = {'thinking_duration': _final_dur}
-                if agent.get('send_intermediate_responses'):
-                    _cl_meta['send_intermediate_responses'] = True
-                chatlog.append({'type': 'final', 'session_id': session_id, 'content': content,
-                                'metadata': _cl_meta})
+            # When recovery exhausted with empty content (e.g. the model wrapped
+            # its whole reply in think tags — #642), still surface a visible final
+            # so the chat UI renders a bubble and the thinking indicator resolves
+            # instead of hanging silently.
+            _display_content = content or "(No response)"
+            _cl_meta = {'thinking_duration': _final_dur}
+            if agent.get('send_intermediate_responses'):
+                _cl_meta['send_intermediate_responses'] = True
+            if not content:
+                # The is_final response_chunk (loop top, gated on `if content`) was
+                # skipped for empty content — emit it here so SSE-mode shows the bubble.
+                event_stream.emit('llm_response_chunk', {
+                    'agent_id': agent_id, 'session_id': session_id,
+                    'external_user_id': external_user_id, 'channel_id': channel_id,
+                    'content': _display_content, 'is_final': True,
+                    'send_as_message': True,
+                })
+            db.add_chat_message(session_id, 'assistant', _display_content, agent_id=db_agent_id, metadata=meta)
+            chatlog.append({'type': 'final', 'session_id': session_id, 'content': _display_content,
+                            'metadata': _cl_meta})
             chatlog.append({'type': 'turn_end', 'session_id': session_id, 'thinking_duration': _final_dur})
             # Persist mental state for next turn
             ms = agent_context.get('agent_state')
@@ -1530,23 +1658,9 @@ def run_tool_loop(agent: Dict[str, Any],
                 timed_out = pending.decision is None
                 decision = pending.decision or 'reject'
 
-                if decision == 'approve':
-                    # Re-execute bypassing safety check
-                    agent_context['_skip_safety'] = True
-                    try:
-                        tool_result = builtin_exec(fn_name, args)
-                        if tool_result is None:
-                            tool_result = real_exec(fn_name, args)
-                    finally:
-                        agent_context.pop('_skip_safety', None)
-                else:
-                    reason = 'timed out' if timed_out else 'rejected by user'
-                    tool_result = {
-                        'error': f'Tool execution {reason}. The user declined to approve this action.',
-                        'level': 'rejected',
-                        'original_reasons': pending.safety_result.get('reasons', []),
-                    }
-
+                # Emit approval_resolved BEFORE re-executing the approved tool so the
+                # UI (inline chat card + global modal) collapses the moment the decision
+                # is recorded, not after a (possibly slow) approved tool finishes running.
                 # Always resolve on the original session (inter-agent or direct)
                 _resolved_sessions = {(session_id, channel_id)}
                 event_stream.emit('approval_resolved', {
@@ -1569,6 +1683,23 @@ def run_tool_loop(agent: Dict[str, Any],
                         'timed_out': timed_out,
                     })
                 approval_registry.remove(pending.approval_id)
+
+                if decision == 'approve':
+                    # Re-execute bypassing safety check
+                    agent_context['_skip_safety'] = True
+                    try:
+                        tool_result = builtin_exec(fn_name, args)
+                        if tool_result is None:
+                            tool_result = real_exec(fn_name, args)
+                    finally:
+                        agent_context.pop('_skip_safety', None)
+                else:
+                    reason = 'timed out' if timed_out else 'rejected by user'
+                    tool_result = {
+                        'error': f'Tool execution {reason}. The user declined to approve this action.',
+                        'level': 'rejected',
+                        'original_reasons': pending.safety_result.get('reasons', []),
+                    }
 
             # Lazy tool injection: use_skill returned tool defs to inject mid-turn
             if fn_name == 'use_skill' and isinstance(tool_result, dict) and 'inject_tools' in tool_result:
@@ -1762,6 +1893,15 @@ def run_tool_loop(agent: Dict[str, Any],
                     chatlog.append({'type': 'error', 'session_id': session_id, 'content': error_msg,
                                     'metadata': {'error': True, 'thinking_duration': _pfs_dur}})
                     chatlog.append({'type': 'turn_end', 'session_id': session_id, 'thinking_duration': _pfs_dur})
+                    # Emit final_answer so auto-forward (e.g. sub-agent → parent) still fires
+                    # on this hard-stop exit path, mirroring the LLM-error and duplicate-text
+                    # exits above. Without this, the delegator never learns the sub-agent died.
+                    event_stream.emit('final_answer', {
+                        'agent_id': agent_id, 'session_id': session_id,
+                        'external_user_id': external_user_id, 'channel_id': channel_id,
+                        'answer': error_msg, 'tool_trace': tool_trace, 'timeline': timeline,
+                        'error': True,
+                    })
                     return {"text": error_msg, "error": True}, tool_trace, timeline
 
             if _tool_call_window.count(_tool_call_key) >= 5 and not _tool_args_force_stop_injected:

@@ -3,10 +3,14 @@ import os
 import sqlite3
 import threading
 from contextlib import contextmanager
-from typing import Any, Dict, List, Optional, Generator
+from typing import Any, Dict, List, Optional, Generator, Tuple
 
 AGENTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'agents')
 SUB_AGENTS_TMP_DIR = "/tmp/evonic-sub-agents"
+
+# Maximum number of messages fetchable in a single paginated request.
+# Prevents O(N) cost on sessions with thousands of messages.
+MAX_LIMIT = 500
 
 # Non-human session identifiers (agent-to-agent, scheduler, system notifications).
 _SYSTEM_EXTERNAL_USER_IDS = frozenset({'__scheduler__'})
@@ -142,6 +146,7 @@ class AgentChatDB:
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_lookup ON chat_sessions(agent_id, channel_id, external_user_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_session ON chat_messages(session_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_created ON chat_messages(session_id, created_at DESC)")
             # Migration: add last_message_ts column to chat_summaries (JSONL watermark)
             try:
                 cursor.execute("ALTER TABLE chat_summaries ADD COLUMN last_message_ts INTEGER")
@@ -507,6 +512,25 @@ class AgentChatDB:
             cursor.execute("DELETE FROM chat_sessions")
             conn.commit()
 
+    def get_last_message_timestamp(self, session_id: str) -> Optional[float]:
+        """Return the unix timestamp of the most recent message in a session.
+
+        Returns None if the session has no messages.
+
+        Performance: the composite index (session_id, created_at DESC)
+        lets SQLite seek directly to the newest row — O(log n), no sort.
+        """
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT strftime('%s', created_at) FROM chat_messages "
+                "WHERE session_id = ? ORDER BY created_at DESC LIMIT 1",
+                (session_id,))
+            row = cursor.fetchone()
+            if row and row[0]:
+                return float(row[0])
+            return None
+
     # ---- Summarization ----
 
     def get_summary(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -692,23 +716,56 @@ class AgentChatDB:
             row = cursor.fetchone()
             return dict(row) if row else None
 
-    def get_session_messages_full(self, session_id: str) -> List[Dict[str, Any]]:
+    def get_session_messages_full(self, session_id: str, limit: int = 200, before_id: Optional[int] = None) -> Tuple[List[Dict[str, Any]], bool]:
+        """Get messages for a session with pagination support.
+
+        When only 'limit' is provided, returns the N most recent messages.
+        When 'before_id' is also provided, returns up to 'limit' messages older than that id.
+
+        Returns:
+            Tuple of (messages, has_more) where has_more is True if there are older messages
+            that were not fetched.
+        """
+        limit = max(1, min(limit, MAX_LIMIT))
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, role, content, metadata, created_at FROM chat_messages
-                WHERE session_id = ? AND role IN ('user', 'assistant') AND content IS NOT NULL AND content != '' AND tool_calls IS NULL
-                ORDER BY id ASC
-            """, (session_id,))
+
+            base_where = """role IN ('user', 'assistant') AND content IS NOT NULL
+                          AND content != '' AND tool_calls IS NULL"""
+            fetch_limit = limit + 1  # fetch one extra to detect has_more
+
+            if before_id is not None:
+                # Cursor-based: fetch older messages before the given id
+                cursor.execute(f"""
+                    SELECT id, role, content, metadata, created_at FROM chat_messages
+                    WHERE session_id = ? AND id < ? AND {base_where}
+                    ORDER BY id DESC
+                    LIMIT ?
+                """, (session_id, before_id, fetch_limit))
+            else:
+                # Default: fetch the N most recent messages
+                cursor.execute(f"""
+                    SELECT id, role, content, metadata, created_at FROM chat_messages
+                    WHERE session_id = ? AND {base_where}
+                    ORDER BY id DESC
+                    LIMIT ?
+                """, (session_id, fetch_limit))
+
             rows = [dict(r) for r in cursor.fetchall()]
+            has_more = len(rows) > limit
+            if has_more:
+                rows = rows[:limit]
+            # Re-sort in ascending order for consistent display
+            rows.reverse()
+
             for r in rows:
                 if r.get('metadata'):
                     try:
                         r['metadata'] = json.loads(r['metadata'])
                     except (json.JSONDecodeError, TypeError):
                         r['metadata'] = None
-            return rows
+            return rows, has_more
 
     def get_new_messages(self, session_id: str, after_id: int) -> List[Dict[str, Any]]:
         """Get messages with id > after_id for real-time polling."""
@@ -789,13 +846,13 @@ class AgentChatDB:
             row = cursor.fetchone()
             if row:
                 return dict(row)
-            # Priority 2: fallback to web session (no channel), exclude test/system
+            # Priority 2: fallback to web session (no channel), exclude system-only IDs.
+            # web_test IS a valid web session — intentionally NOT excluded here.
             cursor.execute("""
                 SELECT * FROM chat_sessions
                 WHERE agent_id = ? AND (archived IS NULL OR archived = 0)
                   AND external_user_id NOT LIKE '__agent__%'
                   AND external_user_id != '__scheduler__'
-                  AND external_user_id != 'web_test'
                   AND external_user_id != '__system__'
                 ORDER BY updated_at DESC LIMIT 1
             """, (agent_id,))

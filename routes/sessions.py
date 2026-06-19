@@ -10,6 +10,7 @@ import time
 from flask import Blueprint, render_template, jsonify, request, send_file
 
 from models.db import db
+from backend.audit_logger import audit
 
 _logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ from backend.tools.read_attachment import (
 )
 
 _ALLOWED_EXTS = (
-    {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf'}
+    {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf', '.zip'}
     | _TEXTISH_EXTS
 )
 
@@ -143,6 +144,10 @@ def api_list_sessions():
     exclude_test = request.args.get('exclude_test', '1') != '0'
     sessions, total = db.get_all_sessions(search=search, limit=limit, offset=offset,
                                           exclude_test=exclude_test)
+    # Tag sessions that are currently being processed by an agent
+    from backend.agent_runtime import agent_runtime
+    for s in sessions:
+        s['is_active'] = agent_runtime._is_busy(s['id'])
     return jsonify({'sessions': sessions, 'total': total})
 
 
@@ -151,8 +156,10 @@ def api_get_session(session_id):
     session = db.get_session_with_details(session_id)
     if not session:
         return jsonify({'error': 'Session not found'}), 404
-    messages = db.get_session_messages_full(session_id)
-    return jsonify({'session': session, 'messages': messages})
+    limit = request.args.get('limit', 200, type=int)
+    before_id = request.args.get('before_id', None, type=int)
+    messages, has_more = db.get_session_messages_full(session_id, limit=limit, before_id=before_id)
+    return jsonify({'session': session, 'messages': messages, 'has_more': has_more})
 
 
 @sessions_bp.route('/api/sessions/<session_id>/poll')
@@ -304,6 +311,7 @@ def api_force_summarize(session_id):
 @sessions_bp.route('/api/sessions/<session_id>', methods=['DELETE'])
 def api_delete_session(session_id):
     result = db.delete_session(session_id)
+    audit.log_session(user_id='admin', session_id=session_id, action='delete', ip=request.remote_addr or '')
     return jsonify({'success': result})
 
 
@@ -312,6 +320,7 @@ def api_clear_all_sessions():
     """Delete all chat sessions, messages, summaries, and attachments
     across all agents."""
     db.clear_all_sessions()
+    audit.log_session(user_id='admin', session_id='*', action='clear_all', ip=request.remote_addr or '')
     return jsonify({'success': True})
 
 

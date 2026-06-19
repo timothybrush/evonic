@@ -112,9 +112,9 @@ DANGEROUS_PATTERNS: list[dict[str, Any]] = [
     {"pattern": r"credentials", "weight": 8, "category": "sensitive_file", "description": "Reference to credentials"},
     {"pattern": r"private_key", "weight": 8, "category": "sensitive_file", "description": "Reference to private key"},
     # SSH directory protection
-    {"pattern": r"(?:^|/|~/)\.ssh(?:/|$)", "weight": 15, "category": "ssh_access", "description": "Access to .ssh directory (SSH keys/config)"},
-    {"pattern": r"/home/[^/]+/\.ssh(?:/|$)", "weight": 15, "category": "ssh_access", "description": "Access to /home/<user>/.ssh (SSH keys/config)"},
-    {"pattern": r"/root/\.ssh(?:/|$)", "weight": 15, "category": "ssh_access", "description": "Access to /root/.ssh (SSH keys/config)"},
+    {"pattern": r"(?:^|/|~/)\.ssh(?:/|$)", "weight": 14, "category": "ssh_access", "description": "Access to .ssh directory (SSH keys/config)"},
+    {"pattern": r"/home/[^/]+/\.ssh(?:/|$)", "weight": 14, "category": "ssh_access", "description": "Access to /home/<user>/.ssh (SSH keys/config)"},
+    {"pattern": r"/root/\.ssh(?:/|$)", "weight": 14, "category": "ssh_access", "description": "Access to /root/.ssh (SSH keys/config)"},
     {"pattern": r"\bid_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?\b", "weight": 12, "category": "ssh_key", "description": "Reference to SSH private/public key file"},
     {"pattern": r"\bauthorized_keys2?\b", "weight": 10, "category": "ssh_key", "description": "Reference to authorized_keys file"},
     {"pattern": r"\bknown_hosts\b", "weight": 8, "category": "ssh_key", "description": "Reference to known_hosts file"},
@@ -191,13 +191,13 @@ BASH_DANGEROUS_PATTERNS: list[dict[str, Any]] = [
     {"pattern": r"\bsnap\s+remove\b", "weight": 10, "category": "package_uninstall", "description": "Snap package removal"},
     {"pattern": r"\bgit\b.*\bpush\b.*(--force-with-lease|--force|-f)\b", "weight": 10, "category": "git_history_rewrite", "description": "Git force push (remote history rewrite)"},
     # SSH directory protection
-    {"pattern": r"(?:^|/|~/)\.ssh(?:/|$)", "weight": 15, "category": "ssh_access", "description": "Access to .ssh directory (SSH keys/config)"},
-    {"pattern": r"/home/[^/]+/\.ssh(?:/|$)", "weight": 15, "category": "ssh_access", "description": "Access to /home/<user>/.ssh (SSH keys/config)"},
-    {"pattern": r"/root/\.ssh(?:/|$)", "weight": 15, "category": "ssh_access", "description": "Access to /root/.ssh (SSH keys/config)"},
-    {"pattern": r"\bcat\s+.*\.ssh/", "weight": 15, "category": "ssh_access", "description": "Reading .ssh directory contents via cat"},
-    {"pattern": r"\bls\s+.*\.ssh", "weight": 15, "category": "ssh_access", "description": "Listing .ssh directory contents"},
-    {"pattern": r"\bcp\s+.*\.ssh/", "weight": 15, "category": "ssh_access", "description": "Copying .ssh directory contents"},
-    {"pattern": r"\bmv\s+.*\.ssh/", "weight": 15, "category": "ssh_access", "description": "Moving .ssh directory contents"},
+    {"pattern": r"(?:^|/|~/)\.ssh(?:/|$)", "weight": 14, "category": "ssh_access", "description": "Access to .ssh directory (SSH keys/config)"},
+    {"pattern": r"/home/[^/]+/\.ssh(?:/|$)", "weight": 14, "category": "ssh_access", "description": "Access to /home/<user>/.ssh (SSH keys/config)"},
+    {"pattern": r"/root/\.ssh(?:/|$)", "weight": 14, "category": "ssh_access", "description": "Access to /root/.ssh (SSH keys/config)"},
+    {"pattern": r"\bcat\s+.*\.ssh/", "weight": 14, "category": "ssh_access", "description": "Reading .ssh directory contents via cat"},
+    {"pattern": r"\bls\s+.*\.ssh", "weight": 14, "category": "ssh_access", "description": "Listing .ssh directory contents"},
+    {"pattern": r"\bcp\s+.*\.ssh/", "weight": 14, "category": "ssh_access", "description": "Copying .ssh directory contents"},
+    {"pattern": r"\bmv\s+.*\.ssh/", "weight": 14, "category": "ssh_access", "description": "Moving .ssh directory contents"},
     {"pattern": r"\bid_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?\b", "weight": 12, "category": "ssh_key", "description": "Reference to SSH private/public key file"},
     {"pattern": r"\bauthorized_keys2?\b", "weight": 10, "category": "ssh_key", "description": "Reference to authorized_keys file"},
 ]
@@ -240,13 +240,32 @@ _SQL_ENG = (r'(?!the\b|a\b|an\b|to\b|for\b|with\b|from\b|in\b|on\b|at\b|'
             r'concept\b|todo\b|module\b|old\b|unused\b|feature\b|version\b|'
             r'array\b|design\b|slow\b)')
 
+# _SQL_ENG_LOOSE is an expanded exclusion list used only by the loose TRUNCATE
+# pattern (without TABLE keyword).  It adds common programming and prose terms
+# that frequently follow "truncate" in natural language but are also plausible
+# table names.  The strict TRUNCATE TABLE pattern (with keyword) uses no
+# exclusion at all, so TRUNCATE TABLE <excluded_word> is always caught.
+_SQL_ENG_LOOSE = (r'(?!the\b|a\b|an\b|to\b|for\b|with\b|from\b|in\b|on\b|at\b|'
+                  r'by\b|of\b|is\b|was\b|are\b|be\b|it\b|this\b|that\b|and\b|or\b|'
+                  r'not\b|no\b|connection\b|support\b|list\b|file\b|code\b|output\b|'
+                  r'concept\b|todo\b|module\b|old\b|unused\b|feature\b|version\b|'
+                  r'array\b|design\b|slow\b|'
+                  r'response\b|data\b|content\b|text\b|string\b|result\b|message\b|'
+                  r'log\b|value\b|field\b|record\b|buffer\b|cache\b|config\b|memory\b|'
+                  r'history\b|lines\b|bytes\b|entry\b|info\b|debug\b|error\b|warning\b)')
+
 SQL_DESTRUCTIVE_PATTERNS: list[dict[str, Any]] = [
     # Data deletion — require SQL identifier after keyword
     {"pattern": r"\bDROP\s+TABLE\s+" + _SQL_ENG + _SQL_ID, "weight": 12, "category": "sql_destructive", "description": "DROP TABLE - permanently deletes a table"},
     {"pattern": r"\bDROP\s+DATABASE\s+" + _SQL_ENG + _SQL_ID, "weight": 15, "category": "sql_destructive", "description": "DROP DATABASE - permanently deletes entire database"},
     {"pattern": r"\bDROP\s+INDEX\s+" + _SQL_ENG + _SQL_ID, "weight": 10, "category": "sql_destructive", "description": "DROP INDEX - deletes a database index"},
     {"pattern": r"\bDROP\s+VIEW\s+" + _SQL_ENG + _SQL_ID, "weight": 10, "category": "sql_destructive", "description": "DROP VIEW - deletes a database view"},
-    {"pattern": r"\bTRUNCATE\s+(?:TABLE\s+)?" + _SQL_ENG + _SQL_ID, "weight": 12, "category": "sql_destructive", "description": "TRUNCATE - removes all rows from a table"},
+    # TRUNCATE: split into strict (requires TABLE keyword) and loose (TABLE
+    # optional with expanded exclusion list) to avoid false positives on
+    # programming prose like "truncate response" while still catching
+    # TRUNCATE TABLE <anything>.
+    {"pattern": r"\bTRUNCATE\s+TABLE\s+" + _SQL_ID, "weight": 12, "category": "sql_destructive", "description": "TRUNCATE TABLE - removes all rows from a table"},
+    {"pattern": r"\bTRUNCATE\s+" + _SQL_ENG_LOOSE + _SQL_ID, "weight": 8, "category": "sql_destructive", "description": "TRUNCATE (without TABLE keyword)"},
     {"pattern": r"\bDELETE\s+FROM\s+" + _SQL_ENG + _SQL_ID, "weight": 10, "category": "sql_destructive", "description": "DELETE FROM - deletes rows from a table"},
     {"pattern": r"\bALTER\s+TABLE\s+" + _SQL_ENG + _SQL_ID + r".*\bDROP\b", "weight": 12, "category": "sql_destructive", "description": "ALTER TABLE ... DROP - destructive schema change"},
 ]
