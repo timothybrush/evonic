@@ -23,6 +23,9 @@ from typing import Dict, Any, List, Optional
 
 _logger = logging.getLogger(__name__)
 
+# Compiled regex constants (module-level to avoid re-compilation on every call)
+_TRIVIAL_RESPONSE_RE = re.compile(r'^[\s>|#\-\.\\/<>!]+$')
+
 # ── Import from split modules ───────────────────────────────────────────────
 
 from backend.agent_runtime.llm_call import (
@@ -1221,8 +1224,7 @@ def run_tool_loop(agent: Dict[str, Any],
         if not tool_calls:
             # Treat trivial single-character/punctuation-only responses (e.g. ">", "<")
             # as empty — these are artefacts from confused models, not real output.
-            _TRIVIAL_RE = re.compile(r'^[\s>|#\-\.\\/<>!]+$')
-            if content and _TRIVIAL_RE.match(content.strip()):
+            if content and _TRIVIAL_RESPONSE_RE.match(content.strip()):
                 _logger.debug("Trivial response %r — treating as empty", content.strip())
                 content = ''
 
@@ -1761,7 +1763,7 @@ def run_tool_loop(agent: Dict[str, Any],
                 event_stream.emit('evonic:agent-state-changed', {'agent_id': agent_id, 'session_id': session_id})
 
             # ── Layer B: Tool Result Scanner (post-execution injection scan) ──
-            _SCAN_RESULT_TOOLS = frozenset({'read_file', 'bash', 'runpy', 'send_agent_message'})
+            _SCAN_RESULT_TOOLS = frozenset({'read_file', 'bash', 'runpy'})
             _already_blocked = isinstance(tool_result, dict) and 'blocked_by' in tool_result
             if fn_name in _SCAN_RESULT_TOOLS and not _already_blocked:
                 _inj_cfg_b = _agent_ig_config

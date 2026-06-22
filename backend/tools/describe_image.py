@@ -59,7 +59,14 @@ def _resolve_vision_model(agent: dict) -> tuple[Optional[Dict[str, Any]], Option
             return model, None
         # model_id was set but invalid — fall through to auto-detect
 
-    # Priority 3: first enabled vision-capable model
+    # Priority 3: agent's current model (natural fallback before global auto-detect).
+    # Uses _db_agent_id for sub-agents so they resolve to the parent agent's model.
+    _agent_db_id = agent.get("_db_agent_id") or agent.get("id")
+    agent_model = db.get_agent_model(_agent_db_id)
+    if agent_model and agent_model.get("vision_supported"):
+        return agent_model, None
+
+    # Priority 4: first enabled vision-capable model
     all_models = db.get_enabled_llm_models()
     for model in all_models:
         if model.get("vision_supported"):
@@ -84,8 +91,13 @@ def execute(agent: dict, args: dict) -> Any:
     Returns:
         str: Plain-text description of the image, or an error message.
     """
-    path = (args.get("path") or "").strip()
-    query = (args.get("query") or "").strip()
+    # Guard against malformed tool calls where the LLM passes a dict/list
+    # instead of a string.  (non-string truthy values would bypass the
+    # `or ""` short-circuit and crash on .strip())
+    path = args.get("path")
+    path = path.strip() if isinstance(path, str) else ""
+    query = args.get("query")
+    query = query.strip() if isinstance(query, str) else ""
 
     # --- Gate: vision_enabled ---
     # The agent_context dict includes vision_enabled when the runtime builds it.
@@ -172,11 +184,25 @@ def execute(agent: dict, args: dict) -> Any:
     except Exception as e:
         return f"Error: Vision model call failed: {e}"
 
-    response_text = result.get("response", "")
-    if not response_text and result.get("error"):
-        return f"Error: Vision model returned an error: {result['error']}"
+    # Check for explicit errors in the result
+    if not result.get("success"):
+        error_type = result.get("error_type", "unknown")
+        error_detail = result.get("error_detail", "")
+        return f"Error: Vision model call failed ({error_type}): {error_detail}"
 
-    if not response_text:
+    # Extract text content from the nested API response.
+    # result["response"] is the raw API dict: {"choices": [{"message": {"content": "..."}}]}
+    response_data = result.get("response", {})
+    choices = response_data.get("choices", [])
+    if not choices:
+        return "Error: Vision model returned no choices in response."
+
+    message = choices[0].get("message", {})
+    content = message.get("content", "")
+    if not content:
         return "Error: Vision model returned an empty response."
 
-    return response_text.strip()
+    # Strip any thinking tags that may have been included
+    from backend.llm_client import strip_thinking_tags
+    cleaned, _ = strip_thinking_tags(content)
+    return cleaned.strip()
