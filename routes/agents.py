@@ -13,6 +13,7 @@ from models.db import db
 from models.chatlog import chatlog_manager, _DISPLAY_TYPES
 from backend.audit_logger import audit
 from backend.tools import tool_registry
+from backend.tools.super_agent_tools import _sync_skill_tools
 from backend.agent_runtime.evomem_client import get_kb_graph_metadata
 
 agents_bp = Blueprint('agents', __name__)
@@ -462,8 +463,13 @@ def api_get_agent_skills(agent_id):
 def api_set_agent_skills(agent_id):
     data = request.get_json()
     skill_ids = data.get('skills', [])
-    db.set_agent_skills(agent_id, skill_ids)
-    return jsonify({'success': True, 'skills': skill_ids})
+    result = _sync_skill_tools(agent_id, skill_ids)
+    return jsonify({
+        'success': True,
+        'skills': skill_ids,
+        'tools_added': result['tools_added'],
+        'tools_removed': result['tools_removed'],
+    })
 
 
 # ==================== Agent Variables API ====================
@@ -1541,37 +1547,38 @@ def api_chat_agent_state(agent_id):
     else:
         merged = agent_data
 
-    if merged:
-        state = AgentState.deserialize(_json.dumps(merged))
-        # Resolve active model badge
-        active_model = None
+    # Explorer sub-agents have no DB row — resolve their config from the manager
+    # so the model badge reflects the explorer's own (configured) model.
+    from backend.subagent_manager import subagent_manager
+    from backend.agent_runtime import explorer as _explorer
+    _sub_cfg = subagent_manager.get(agent_id)
+    _is_explorer = _sub_cfg is not None and _explorer.is_explorer(_sub_cfg)
+
+    def _resolve_active_model():
         fb_id = agent_data.get('active_fallback_model_id')
         if fb_id:
             fb_model = db.get_model_by_id(fb_id)
-            if fb_model:
-                active_model = {
-                    'name': fb_model.get('name', fb_id),
-                    'model_name': fb_model.get('model_name', fb_id),
-                    'is_fallback': True,
-                    'id': fb_id,
-                }
-            else:
-                active_model = {
-                    'name': fb_id,
-                    'model_name': fb_id,
-                    'is_fallback': True,
-                    'id': fb_id,
-                }
+            return {
+                'name': (fb_model or {}).get('name', fb_id),
+                'model_name': (fb_model or {}).get('model_name', fb_id),
+                'is_fallback': True,
+                'id': fb_id,
+            }
+        if _is_explorer:
+            prim_model = _explorer.primary_model(_sub_cfg) or db.get_agent_model(agent_id)
         else:
-            # Show primary model
             prim_model = db.get_agent_model(agent_id)
-            if prim_model:
-                active_model = {
-                    'name': prim_model.get('name', 'unknown'),
-                    'model_name': prim_model.get('model_name', 'unknown'),
-                    'is_fallback': False,
-                    'id': prim_model.get('id', ''),
-                }
+        if prim_model:
+            return {
+                'name': prim_model.get('name', 'unknown'),
+                'model_name': prim_model.get('model_name', 'unknown'),
+                'is_fallback': False,
+                'id': prim_model.get('id', ''),
+            }
+        return None
+
+    if merged:
+        state = AgentState.deserialize(_json.dumps(merged))
         payload = {
             'mode': state.mode,
             'tasks': state.tasks,
@@ -1579,7 +1586,14 @@ def api_chat_agent_state(agent_id):
             'states': state.states,
             'focus': state.focus,
             'focus_reason': state.focus_reason,
-            'active_model': active_model,
+            'active_model': _resolve_active_model(),
+            'loaded_skills': loaded_skills,
+        }
+    elif _is_explorer:
+        # Minimal state, but still surface the explorer's model badge.
+        payload = {
+            'mode': 'execute',
+            'active_model': _resolve_active_model(),
             'loaded_skills': loaded_skills,
         }
     else:

@@ -1812,8 +1812,13 @@ class AgentRuntime:
         else:
             tools = _ctx.build_tools(agent)
 
-            # Build agent context for tool backends
-            assigned_tool_ids = db.get_agent_tools(db_agent_id)
+            # Build agent context for tool backends. Explorers use their own
+            # configured tool set; everyone else inherits from the DB.
+            if agent.get('is_explorer'):
+                from backend.agent_runtime import explorer as _explorer
+                assigned_tool_ids = list(_explorer.tool_ids(agent))
+            else:
+                assigned_tool_ids = db.get_agent_tools(db_agent_id)
 
             # Super agent gets all skill tool IDs automatically — authorization guard
             # must allow execution of all skill tools without per-skill assignment.
@@ -2035,7 +2040,8 @@ class AgentRuntime:
 
         try:
             from backend.llm_usage_events import usage_context
-            with usage_context('agent_turn', agent_id, agent.get('name'), ctx.session_id):
+            _usage_source = 'explorer' if agent.get('is_explorer') else 'agent_turn'
+            with usage_context(_usage_source, agent_id, agent.get('name'), ctx.session_id):
                 response_raw, tool_trace, timeline = _loop.run_tool_loop(
                     agent=agent,
                     agent_context=agent_context,
@@ -2437,14 +2443,18 @@ class AgentRuntime:
         }
 
         # 3. Write chat entry
-        if caption:
+        if is_image:
+            content = f"![{filename}](/api/attachments/{attachment_id}/view)"
+            if caption:
+                content = f"{caption}\n" + content
+        elif caption:
             content = f"{caption}\n[File: {filename}]"
         else:
             content = f"[File: {filename}]"
 
         chatlog = chatlog_manager.get(agent_id, session_id)
         chatlog.append({
-            'type': 'user',
+            'type': 'final',
             'session_id': session_id,
             'content': content,
             'metadata': {'attachment_info': attachment_info, 'channel': channel_type},
@@ -2544,6 +2554,23 @@ class AgentRuntime:
             'audio_url': audio_url,
             'video_url': video_url,
         })
+
+        # Mid-loop injection: if session is currently processing, inject message
+        # into the active loop instead of queuing a new task.
+        if agent and self._is_busy(session_id):
+            self._get_inject_queue(session_id).put({
+                'role': 'user',
+                'content': text,
+            })
+            event_stream.emit('message_injected', {
+                'agent_id': agent_id,
+                'agent_name': agent.get('name', ''),
+                'session_id': session_id,
+                'external_user_id': external_user_id,
+                'channel_id': channel_id,
+                'message': text,
+            })
+            return True
 
         # Enqueue for agent processing (fire-and-forget)
         if agent and agent.get('enabled', True):

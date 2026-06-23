@@ -402,10 +402,13 @@ def run_tool_loop(agent: Dict[str, Any],
     except Exception as e:
         _logger.warning("Failed to read agent_state for fallback check: %s", e)
 
-    # Step 2: If no fallback from state, resolve normal default model
+    # Step 2: If no fallback from state, resolve normal default model.
+    # Explorers use their configured model when set, else the global default
+    # (db.get_agent_model on their row-less id already returns the default).
     if not agent_model_config:
         try:
-            model = db.get_agent_model(agent_id)
+            from backend.agent_runtime import explorer as _explorer
+            model = _explorer.primary_model(agent) or db.get_agent_model(agent_id)
             if model:
                 agent_model_config = _build_model_config(model)
                 _logger.info("%s using model: %s (%s)", agent_id, model.get('name'), model.get('model_name'))
@@ -730,7 +733,10 @@ def run_tool_loop(agent: Dict[str, Any],
             # Auto-retry on transient provider/connection errors (no partial output to preserve)
             if error_type in ('provider_error', 'connection_error') and timeout_retries < max_timeout_retries:
                 timeout_retries += 1
-                _has_fallback = db.get_agent_fallback_model(agent_id) is not None
+                from backend.agent_runtime import explorer as _explorer
+                _has_fallback = (
+                    _explorer.fallback_model(agent) or db.get_agent_fallback_model(agent_id)
+                ) is not None
                 # If a fallback model is configured, only retry once then fall through
                 # to fallback logic (line ~573+). Without fallback: retry as usual.
                 if not _has_fallback or timeout_retries < 1:
@@ -924,7 +930,8 @@ def run_tool_loop(agent: Dict[str, Any],
             # agent's configured fallback model (if any) before giving up.
             _fallback_succeeded = False
             _fallback_vision_stripped = False
-            _fallback_model = db.get_agent_fallback_model(agent_id)
+            from backend.agent_runtime import explorer as _explorer
+            _fallback_model = _explorer.fallback_model(agent) or db.get_agent_fallback_model(agent_id)
             if _fallback_model:
                 _logger.warning(
                     "Primary model failed [%s] for agent %s — attempting fallback model %s (%s)",
@@ -1823,17 +1830,27 @@ def run_tool_loop(agent: Dict[str, Any],
                 _exit_code = tool_result.get('exit_code', 0)
 
             # --- RTK split-path compression ---
+            _rtk_failed = False
             try:
                 _cmd = _extract_command(fn_name, args)
                 compressed_str = _get_rtk_registry().compress(_cmd, _exit_code, result_str)
             except Exception:
                 _logger.warning("RTK compression failed for %r — falling back to truncation", fn_name, exc_info=True)
-                if len(result_str) > MAX_TOOL_RESULT_CHARS:
-                    remaining = len(result_str) - MAX_TOOL_RESULT_CHARS
-                    compressed_str = (result_str[:MAX_TOOL_RESULT_CHARS] +
-                                      f"\n...[truncated — {remaining} chars omitted]")
-                else:
-                    compressed_str = result_str
+                _rtk_failed = True
+                compressed_str = result_str
+
+            # --- Hard truncation safety net ---
+            # Runs even when RTK succeeded but returned uncompressed oversized
+            # output (e.g. no filter matched).  This is the final backstop
+            # against sending multi-megabyte tool outputs to the LLM and
+            # triggering "Conversation is too long" errors.
+            if len(compressed_str) > MAX_TOOL_RESULT_CHARS:
+                remaining = len(compressed_str) - MAX_TOOL_RESULT_CHARS
+                compressed_str = (compressed_str[:MAX_TOOL_RESULT_CHARS] +
+                                  f"\n...[truncated — {remaining} chars omitted]")
+                if not _rtk_failed:
+                    _logger.info("Hard-truncated %r output: %d -> %d chars (RTK returned uncompressed)", 
+                                 fn_name, len(result_str), MAX_TOOL_RESULT_CHARS)
 
             # Structured result for timeline/UI — always full data, never truncated
             if isinstance(tool_result, dict):

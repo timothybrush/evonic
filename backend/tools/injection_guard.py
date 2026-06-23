@@ -47,13 +47,11 @@ _SEVERITY_SCORE = {
 }
 
 # ───────────────────────────────────────────────────────────────────────
-# Guarded Tools — only scan these tools for injection
+# Arg-Guarded Tools — only scan arguments of these tools for injection
 # ───────────────────────────────────────────────────────────────────────
 
-_GUARDED_TOOLS = frozenset({
+_ARG_GUARDED_TOOLS = frozenset({
     "read_file",
-    "bash",
-    "runpy",
     "send_agent_message",
 })
 
@@ -970,7 +968,7 @@ def injection_tool_guard(agent_id: str, tool_name: str, args: dict) -> Optional[
         None  — if clean or guard is disabled for this agent.
     """
     # Only guard specific tools
-    if tool_name not in _GUARDED_TOOLS:
+    if tool_name not in _ARG_GUARDED_TOOLS:
         return None
 
     # Super agents bypass all guards
