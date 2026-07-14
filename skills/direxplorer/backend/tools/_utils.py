@@ -33,12 +33,27 @@ def _auto_correct_path(requested_path: str, workspace: str, path_is_dir: bool = 
     return sorted(matches)[0] if matches else requested_path
 
 
+def _is_kb_vault_path(path: str) -> bool:
+    """True if ``path`` points inside an agent's managed KB vault (agents/<id>/kb).
+
+    KB vaults live under a gitignored ``agents/`` tree, so ripgrep — which respects
+    .gitignore by default — would skip every doc and return zero matches. Callers
+    use this to force a full search (``--no-ignore``) for the vault while normal
+    code workspaces keep honoring ignore files.
+    """
+    parts = os.path.normpath(os.path.abspath(path)).split(os.sep)
+    for i in range(len(parts) - 2):
+        if parts[i] == 'agents' and parts[i + 2] == 'kb':
+            return True
+    return False
+
+
 def _resolve_workspace(agent: dict, path: str) -> str:
     """Resolve a file path against the agent's workspace.
 
     Handles three cases:
     1. /workspace sandbox prefix → maps to agent's host workspace
-       (e.g. /workspace/skills → /home/robin/dev/evonic/skills)
+       (e.g. /workspace/skills → /home/user/dev/evonic/skills)
     2. Relative paths → joins with agent's workspace
     3. Absolute paths → returns os.path.abspath (boundary check done separately)
     """

@@ -91,6 +91,8 @@ from routes.skills import skills_bp
 from routes.plugins import plugins_bp
 from routes.scheduler import scheduler_bp
 from routes.models import models_bp
+from routes.providers import providers_bp
+from routes.codex import codex_bp
 from routes.health import health_bp
 from routes.workplaces import workplaces_bp
 from routes.logs import logs_bp
@@ -236,6 +238,8 @@ app.register_blueprint(settings_bp)
 app.register_blueprint(sessions_bp)
 app.register_blueprint(dashboard_bp)
 app.register_blueprint(models_bp)
+app.register_blueprint(providers_bp)
+app.register_blueprint(codex_bp)
 app.register_blueprint(health_bp)
 app.register_blueprint(workplaces_bp)
 app.register_blueprint(logs_bp)
@@ -570,6 +574,20 @@ def inject_config():
 @app.context_processor
 def inject_plugin_nav():
     return {'plugin_nav_items': plugin_manager.get_nav_items()}
+
+
+@app.context_processor
+def inject_plugin_agent_tabs():
+    """Inject plugin-declared agent tabs for agent detail pages only.
+
+    Scoped via g.agent_id (set in routes/agents.py agent_detail() before
+    render). Returns empty list for non-agent pages (dashboard, settings,
+    login, etc.) to avoid unnecessary computation.
+    """
+    agent_id = getattr(_g, 'agent_id', None)
+    if agent_id:
+        return {'plugin_agent_tabs': plugin_manager.get_agent_tabs(agent_id)}
+    return {'plugin_agent_tabs': []}
 
 
 @app.context_processor

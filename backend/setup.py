@@ -150,7 +150,7 @@ preferences, and communication style instructions.
 
 ## Usage
 
-- Read this file: read("notes.md")
+- Read this file: read_file(file_path="/_self/kb/notes.md")
 - Update via write_file with path /_self/kb/notes.md
 - Update immediately when the user gives a new preference
 - Prioritize notes.md over `remember` for non-factual preference information
@@ -386,8 +386,21 @@ def run_setup(
             _update_env_var(env_path, "SECRET_KEY", _key)
             os.environ["SECRET_KEY"] = _key
 
-        # 1. Create model in DB as default
-        model_id = f"setup_{provider}"
+        # 1a. Ensure provider exists in providers table
+        if not db.get_provider(provider):
+            db.create_provider({
+                "id": provider,
+                "name": provider_cfg.get("label", provider),
+                "type": provider_cfg.get("type", "remote"),
+                "base_url": resolved_base_url,
+                "api_key": api_key or "",
+                "api_format": provider_cfg.get("api_format", "openai"),
+            })
+        elif api_key:
+            db.update_provider(provider, {"api_key": api_key, "base_url": resolved_base_url})
+
+        # 1b. Create model in DB as default
+        model_id = db.generate_model_id(provider, model_name)
         # Derive api_format: ollama + local → openai, ollama + remote → ollama native
         if provider == "ollama" and "ollama.com" in resolved_base_url:
             model_api_format = "ollama"
@@ -580,8 +593,20 @@ def run_reconfigure(
     resolved_base_url = (base_url or provider_cfg["base_url"]).rstrip("/")
 
     try:
-        # 1. Update or create model in DB as default
-        model_id = f"setup_{provider}"
+        # 1a. Ensure provider exists in providers table
+        if not db.get_provider(provider):
+            db.create_provider({
+                "id": provider,
+                "name": provider_cfg.get("label", provider),
+                "type": provider_cfg.get("type", "remote"),
+                "base_url": resolved_base_url,
+                "api_key": api_key or "",
+                "api_format": provider_cfg.get("api_format", "openai"),
+            })
+        elif api_key:
+            db.update_provider(provider, {"api_key": api_key, "base_url": resolved_base_url})
+
+        # 1b. Update or create model in DB as default
         # Derive api_format: ollama + local → openai, ollama + remote → ollama native
         if provider == "ollama" and "ollama.com" in resolved_base_url:
             model_api_format = "ollama"
@@ -590,7 +615,6 @@ def run_reconfigure(
             model_api_format = provider_cfg.get("api_format", "openai")
             model_type = provider_cfg["type"]
         model_data = {
-            "id": model_id,
             "name": f"{provider_cfg['label']} ({model_name})",
             "type": model_type,
             "provider": provider,
@@ -601,10 +625,13 @@ def run_reconfigure(
             "enabled": 1,
             "api_format": model_api_format,
         }
-        existing_model = db.get_model_by_id(model_id)
+        # Look up by new-format id first, then the legacy setup_<provider> id
+        existing_model = db.get_model_by_id(
+            f"{provider}/{model_name}"
+        ) or db.get_model_by_id(f"setup_{provider}")
         if existing_model:
             # Update preserves the user's manual thinking toggle
-            db.update_model(model_id, model_data)
+            db.update_model(existing_model["id"], model_data)
         else:
             model_data["thinking"] = 1 if provider_cfg.get("default_thinking") else 0
             db.create_model(model_data)

@@ -151,7 +151,90 @@ html.dark #system-prompt-modal .bg-gray-900 { background: #111827; }
 html.dark #system-prompt-modal .hover\:bg-gray-200:hover { background: #4b5563; }
 html.dark #system-prompt-modal .hover\:bg-gray-600:hover { background: #4b5563; }
 html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
+/* KB Graph search highlight transitions */
+#kb-graph-svg circle { transition: opacity 0.3s, r 0.15s; }
+#kb-graph-svg text   { transition: opacity 0.3s; }
+#kb-graph-svg image  { transition: opacity 0.3s; }
+#kb-graph-svg line   { transition: opacity 0.3s; }
+.kb-node-dimmed circle { opacity: 0.15 !important; }
+.kb-node-dimmed image  { opacity: 0.15 !important; }
+.kb-node-dimmed text   { opacity: 0.1 !important; }
+.kb-link-dimmed        { opacity: 0.05 !important; }
+@keyframes kb-pulse-border {
+  0%, 100% { stroke-opacity: 1; stroke-width: 3; }
+  50%      { stroke-opacity: 0.3; stroke-width: 2; }
+}
+.kb-node-match circle  { stroke: #f97316 !important; animation: kb-pulse-border 1.2s ease-in-out infinite; }
 
+.tab-btn { cursor: pointer; }
+
+/* Agent detail tabs — aligned with the System Settings nav rail
+   (icon + hover/select highlight). Vertical rail on desktop,
+   horizontal bar on mobile. Layout lives here (not Tailwind) because
+   this project's Tailwind is precompiled and lacks these lg: variants. */
+.agent-tabs {
+    display: flex;
+    gap: 2px;
+    flex-shrink: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-bottom: 6px;
+    margin-bottom: 6px;
+    border-bottom: 1px solid var(--border-color);
+    -webkit-overflow-scrolling: touch;
+}
+@media (min-width: 1024px) {
+    .agent-tabs {
+        flex-direction: column;
+        width: 12rem;
+        overflow-x: hidden;
+        overflow-y: auto;
+        padding-bottom: 0;
+        margin-bottom: 0;
+        padding-right: 12px;
+        border-bottom: none;
+        border-right: 1px solid var(--border-color);
+    }
+}
+.agent-tab {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+    font-weight: 500;
+    text-align: left;
+    white-space: nowrap;
+    flex-shrink: 0;
+    cursor: pointer;
+    transition: background-color 0.15s ease, color 0.15s ease;
+}
+.agent-tab svg {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    opacity: 0.75;
+    transition: opacity 0.15s ease;
+}
+.agent-tab:hover {
+    background: var(--bg-hover);
+    color: var(--text-heading);
+}
+.agent-tab.active {
+    background: rgba(99, 102, 241, 0.10);
+    color: #4f46e5;
+}
+.agent-tab.active svg { opacity: 1; }
+html.dark .agent-tab.active {
+    background: rgba(129, 140, 248, 0.14);
+    color: #a5b4fc;
+}
+.agent-tab.hidden { display: none; }
+@media (min-width: 1024px) { .agent-tab { width: 100%; } }
 </style>
 <div class="px-2 py-1 md:py-4 flex-1 min-h-0 flex flex-col h-[calc(100dvh-var(--header-h,56px))]">
     {% if workspace_invalid %}
@@ -172,6 +255,15 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
         </div>
     </div>
     {% endif %}
+    <div id="whatsapp-bridge-banner" class="hidden bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg px-4 py-3 mb-4 flex-shrink-0">
+        <div class="flex items-center gap-3">
+            <svg class="w-5 h-5 text-amber-500 dark:text-amber-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86l-8.6 14.86A1 1 0 002.56 20h18.88a1 1 0 00.87-1.5l-8.6-14.86a1 1 0 00-1.74 0z"/>
+            </svg>
+            <p id="wa-bridge-banner-text" class="text-sm font-medium text-amber-800 dark:text-amber-300 flex-1">WhatsApp is not connected — messages will not be received.</p>
+            <button onclick="reconnectWhatsApp()" class="text-xs px-3 py-1 rounded bg-green-50 text-green-700 hover:bg-green-100 flex-shrink-0">Reconnect</button>
+        </div>
+    </div>
     <!-- Header -->
     <div class="flex items-center justify-between mb-4 flex-shrink-0">
         <div class="flex items-center gap-3">
@@ -203,20 +295,28 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
             </div>
         </div>
     </div>
-    <!-- Tabs -->
-    <div class="flex gap-1 mb-6 border-b border-gray-200 dark:border-gray-700 overflow-x-auto flex-shrink-0" style="-webkit-overflow-scrolling: touch;">
-        <button class="tab-btn flex-shrink-0 whitespace-nowrap px-4 py-2.5 text-sm font-medium border-b-2 border-indigo-500 text-indigo-600" onclick="showTab('chat')" data-tab="chat">Chat</button>
-        <button class="tab-btn flex-shrink-0 whitespace-nowrap px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" onclick="showTab('general')" data-tab="general">Settings</button>
-        <button class="tab-btn flex-shrink-0 whitespace-nowrap px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" onclick="showTab('knowledge')" data-tab="knowledge">Knowledge</button>
-        <button class="tab-btn flex-shrink-0 whitespace-nowrap px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" onclick="showTab('tools')" data-tab="tools">Tools</button>
+    <!-- Tabs: responsive — horizontal scrollable (mobile), vertical left panel (desktop) -->
+    <div class="flex flex-col lg:flex-row flex-1 min-h-0 gap-4">
+    <!-- Tab nav — icon rail (desktop) / horizontal bar (mobile), aligned with System Settings.
+         Uses <div> (not <nav>) to avoid the global mobile top-navbar CSS on `nav`. -->
+    <div class="agent-tabs" role="tablist">
+        <button class="agent-tab tab-btn active" onclick="showTab('chat')" data-tab="chat"><i data-lucide="message-square"></i><span>Chat</span></button>
+        <button class="agent-tab tab-btn" onclick="showTab('general')" data-tab="general"><i data-lucide="sliders-horizontal"></i><span>Settings</span></button>
+        <button class="agent-tab tab-btn" onclick="showTab('knowledge')" data-tab="knowledge"><i data-lucide="book-open"></i><span>Knowledge</span></button>
+        <button class="agent-tab tab-btn" onclick="showTab('tools')" data-tab="tools"><i data-lucide="wrench"></i><span>Tools</span></button>
         {# Always rendered (hidden for super) so softSwitchAgent can toggle without a full reload #}
-        <button class="tab-btn flex-shrink-0 whitespace-nowrap px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700{{ ' hidden' if agent.is_super else '' }}" onclick="showTab('skills')" data-tab="skills">Skills</button>
-        <button class="tab-btn flex-shrink-0 whitespace-nowrap px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" onclick="showTab('channels')" data-tab="channels">Channels</button>
-        <button class="tab-btn flex-shrink-0 whitespace-nowrap px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" onclick="showTab('portals')" data-tab="portals">Portals</button>
+        <button class="agent-tab tab-btn{{ ' hidden' if agent.is_super else '' }}" onclick="showTab('skills')" data-tab="skills"><i data-lucide="sparkles"></i><span>Skills</span></button>
+        <button class="agent-tab tab-btn" onclick="showTab('channels')" data-tab="channels"><i data-lucide="radio"></i><span>Channels</span></button>
+        <button class="agent-tab tab-btn" onclick="showTab('portals')" data-tab="portals"><i data-lucide="folder-symlink"></i><span>Portals</span></button>
         {% if agent.artifacts_enabled %}
-        <button class="tab-btn flex-shrink-0 whitespace-nowrap px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" onclick="showTab('artifacts')" data-tab="artifacts">Artifacts</button>
+        <button class="agent-tab tab-btn" onclick="showTab('artifacts')" data-tab="artifacts"><i data-lucide="package"></i><span>Artifacts</span></button>
         {% endif %}
+{% for _tab in plugin_agent_tabs %}
+        <button class="agent-tab tab-btn"
+            onclick="showTab('{{ _tab.id }}')" data-tab="{{ _tab.id }}"><i data-lucide="{{ _tab.icon | default('puzzle', true) }}"></i><span>{{ _tab.label }}</span></button>
+{% endfor %}
     </div>
+    <div class="flex flex-col flex-1 min-h-0 min-w-0">
 
     <!-- Settings Tab -->
     <div id="tab-general" class="tab-content hidden flex-1 min-h-0 overflow-y-auto">
@@ -327,7 +427,7 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
                     {{ toggle_widget(id='agent-attachments', checked=agent.attachments_enabled) }}
                     <div>
                         <span class="text-gray-600 dark:text-gray-300 text-sm font-medium">Attachments (Files)</span>
-                        <p class="text-xs text-gray-400 mt-0.5">Allow agent to receive non-image files (PDF, audio, video, etc.) from channels. Files are stored for 7 days and read on demand via the <code>read_attachment</code> tool. Requires a model with <code>attachments_supported</code>.</p>
+                        <p class="text-xs text-gray-400 mt-0.5">Allow agent to receive non-image files (PDF, audio, video, etc.) from channels. Files are stored for 7 days and read on demand via the <code>read_attachment</code> tool.</p>
                     </div>
                 </label>
                 <div class="mt-2 flex items-center gap-2">
@@ -376,6 +476,26 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
                         <p class="text-xs text-gray-400 mt-1">Number of recent messages kept in raw form (not summarized).</p>
                     </div>
                     <div>
+                        <label class="block mb-1 text-gray-600 dark:text-gray-300 text-sm font-medium">Memory Engine</label>
+                        <select id="agent-memory-engine" class="w-full p-2.5 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 rounded-md text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10">
+                            <option value="" {{ 'selected' if not agent.memory_engine else '' }}>Default (global setting)</option>
+                            <option value="evomem" {{ 'selected' if agent.memory_engine == 'evomem' else '' }}>Evomem (semantic + knowledge graph)</option>
+                            <option value="fts5" {{ 'selected' if agent.memory_engine == 'fts5' else '' }}>FTS5 (keyword full-text search)</option>
+                        </select>
+                        <p class="text-xs text-gray-400 mt-1">How past memories are retrieved into context. Evomem uses semantic search + a knowledge graph; FTS5 uses SQLite keyword search. Default follows the server's <code>EVONIC_MEMORY_ENGINE</code>.</p>
+                    </div>
+                    <div>
+                        <label class="block mb-1 text-gray-600 dark:text-gray-300 text-sm font-medium">KB Organizer</label>
+                        <select id="agent-kb-organizer" class="w-full p-2.5 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 rounded-md text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10">
+                            <option value="" {{ 'selected' if not agent.kb_organizer_mode else '' }}>Default (global setting)</option>
+                            <option value="agentic" {{ 'selected' if agent.kb_organizer_mode == 'agentic' else '' }}>Agentic (sub-agent organizer)</option>
+                            <option value="non-agentic" {{ 'selected' if agent.kb_organizer_mode == 'non-agentic' else '' }}>Evomem Lookup (non-agentic)</option>
+                            <option value="sefton" {{ 'selected' if agent.kb_organizer_mode == 'sefton' else '' }}>SEFTON (search + nightly tidy)</option>
+                            <option value="off" {{ 'selected' if agent.kb_organizer_mode == 'off' else '' }}>Off</option>
+                        </select>
+                        <p class="text-xs text-gray-400 mt-1">Files conversation knowledge into the vault. <span class="text-amber-600 dark:text-amber-500 font-medium">Agentic</span> spawns a Knowledge Organizer sub-agent that explores the vault and links docs; best quality but <strong>incurs extra token cost</strong> per run. <span class="font-medium">Evomem Lookup (non-agentic)</span> files via a single LLM call; cheaper, no vault exploration. <span class="font-medium">SEFTON</span> (Search Engine First, Tidy On Night) files cheaply via evomem search (~5 min debounce) plus a nightly agentic deep-tidy at 03:00. Only applies when Memory Engine is Evomem. Default follows the server's <code>EVOMEM_KB_ORGANIZER</code>.</p>
+                    </div>
+                    <div>
                         <label class="block mb-1 text-gray-600 dark:text-gray-300 text-sm font-medium">Message Buffer (seconds)</label>
                         <input type="number" id="agent-buffer-seconds" min="0" step="0.5" value="{{ agent.message_buffer_seconds if agent.message_buffer_seconds is not none else 2 }}" class="w-32 p-2.5 border border-gray-300 rounded-md text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10">
                         <p class="text-xs text-gray-400 mt-1">Wait time to accumulate rapid messages before calling LLM. Set to 0 to disable.</p>
@@ -395,6 +515,24 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
                             <div>
                                 <span class="text-gray-600 dark:text-gray-300 text-sm font-medium">Agent State</span>
                                 <p class="text-xs text-gray-400 mt-0.5">Enable plan/execute mode tracking. Write tools are blocked until the agent presents a plan and user approves.</p>
+                            </div>
+                        </label>
+                    </div>
+                    <div>
+                        <label class="flex items-center gap-3 cursor-pointer select-none">
+                            {{ toggle_widget(id='agent-atg-enabled', checked=agent.enable_atg) }}
+                            <div>
+                                <span class="text-gray-600 dark:text-gray-300 text-sm font-medium">Atomic Task Graph (experimental)</span>
+                                <p class="text-xs text-gray-400 mt-0.5">Compile complex tasks into a dependency graph with parallel execution and localized error repair. Requires Agent State; only applies to tasks classified as complex.</p>
+                            </div>
+                        </label>
+                    </div>
+                    <div>
+                        <label class="flex items-center gap-3 cursor-pointer select-none">
+                            {{ toggle_widget(id='agent-cmp-enabled', checked=agent.enable_cmp) }}
+                            <div>
+                                <span class="text-gray-600 dark:text-gray-300 text-sm font-medium">Context Memory Path (experimental)</span>
+                                <p class="text-xs text-gray-400 mt-0.5">Track multiple tasks in a session as navigable paths with per-task context. Requires Agent State.</p>
                             </div>
                         </label>
                     </div>
@@ -424,6 +562,7 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
                                 <p class="text-xs text-gray-400 mt-0.5">Allow this agent to send messages to other agents. Enables <code>send_agent_message</code>, <code>escalate_to_user</code>, and <code>resolve_agent_approval</code> tools automatically.</p>
                             </div>
                         </label>
+                        <button type="button" onclick="openMessagingAclModal()" class="flex items-center gap-1 text-xs text-indigo-500 hover:text-indigo-600 dark:text-indigo-400 dark:hover:text-indigo-300 mt-1 transition-colors" style="margin-left:3rem"><svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>Messaging Access Control</button>
                     </div>
                     <div>
                         <label class="flex items-center gap-3 cursor-pointer select-none">
@@ -439,7 +578,7 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
                             {{ toggle_widget(id='agent-builtin-tools', checked=(agent.builtin_tools_enabled if agent.builtin_tools_enabled is not none else True)) }}
                             <div>
                                 <span class="text-gray-600 dark:text-gray-300 text-sm font-medium">Built-in Tools</span>
-                                <p class="text-xs text-gray-400 mt-0.5">Provide core tools (read, use_skill, set_mode, remember, recall, etc.). Disable to run this agent with only its assigned tools — useful for minimal tool surface or testing.</p>
+                                <p class="text-xs text-gray-400 mt-0.5">Provide core tools (use_skill, set_mode, remember, recall, etc.). Disable to run this agent with only its assigned tools — useful for minimal tool surface or testing.</p>
                             </div>
                         </label>
                     </div>
@@ -499,9 +638,12 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
                     </div>
 
                     <div>
-                        <label class="block mb-1 text-gray-600 dark:text-gray-300 text-sm font-medium">Summarize Prompt</label>
-                        <textarea id="agent-summarize-prompt" rows="10" class="w-full p-2.5 border border-gray-300 rounded-md text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10">{{ agent.summarize_prompt or DEFAULT_SUMMARIZE_PROMPT }}</textarea>
-                        <p class="text-xs text-gray-400 mt-1">Custom prompt for summarization. Use <code>{existing_summary_section}</code> and <code>{messages_text}</code> as placeholders.</p>
+                        <div class="flex items-center gap-2 mb-1">
+                            <input type="checkbox" id="agent-summarize-prompt-override" {{ 'checked' if agent.summarize_prompt else '' }} onchange="toggleSummarizePromptOverride()" class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
+                            <label for="agent-summarize-prompt-override" class="text-gray-600 dark:text-gray-300 text-sm font-medium">Override default summarizer prompt</label>
+                        </div>
+                        <textarea id="agent-summarize-prompt" rows="10" class="w-full p-2.5 border border-gray-300 rounded-md text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 {{ 'opacity-50' if not agent.summarize_prompt else '' }}" {{ '' if agent.summarize_prompt else 'disabled' }}>{{ agent.summarize_prompt or DEFAULT_SUMMARIZE_PROMPT }}</textarea>
+                        <p class="text-xs text-gray-400 mt-1">Unchecked: the built-in default prompt is used (kept up to date automatically — recommended). Check to provide your own. Use <code>{existing_summary_section}</code> and <code>{messages_text}</code> placeholders.</p>
                     </div>
                     <div class="pt-2">
                         <button id="saveAdvancedBtn" onclick="saveAdvanced()" class="bg-indigo-500 hover:bg-indigo-600 text-white px-5 py-2 rounded-md text-sm font-medium transition-colors disabled:opacity-60 disabled:cursor-not-allowed">Save Advanced</button>
@@ -513,7 +655,37 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
                 <h3 class="text-sm font-semibold text-gray-800 dark:text-gray-100 mb-1">Variables</h3>
                 <p class="text-xs text-gray-400 mb-4">Key-value config for tools &amp; skills (e.g. <code>SSH_HOST</code>, <code>SSH_USERNAME</code>). Mark as secret to mask values.</p>
                 <div id="agent-variables-list" class="space-y-2 mb-3"></div>
-                <button type="button" onclick="addVariableRow()" class="text-sm text-indigo-500 hover:text-indigo-700 transition-colors">+ Add Variable</button>
+                <button type="button" onclick="openAddVariableModal()" class="text-sm text-indigo-500 hover:text-indigo-700 transition-colors">+ Add Variable</button>
+            </div>
+            <!-- Add Variable Modal -->
+            <div id="add-var-modal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-[200]">
+                <div class="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-md p-6" onclick="event.stopPropagation()">
+                    <h3 class="text-base font-semibold text-gray-800 dark:text-gray-100 mb-4">Add Variable</h3>
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block mb-1 text-xs font-medium text-gray-600 dark:text-gray-400">Key</label>
+                            <input type="text" id="add-var-key" placeholder="KEY_NAME"
+                                class="var-key w-full p-2.5 border border-gray-300 rounded-md text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10"
+                                style="text-transform: uppercase;">
+                        </div>
+                        <div>
+                            <label class="block mb-1 text-xs font-medium text-gray-600 dark:text-gray-400">Value</label>
+                            <input type="text" id="add-var-value" placeholder="value"
+                                class="w-full p-2.5 border border-gray-300 rounded-md text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10">
+                        </div>
+                        <label class="flex items-center gap-2 cursor-pointer select-none text-sm text-gray-600 dark:text-gray-400">
+                            <input type="checkbox" id="add-var-secret" class="rounded border-gray-300 text-indigo-500 focus:ring-indigo-400"
+                                onchange="document.getElementById('add-var-value').type = this.checked ? 'password' : 'text'">
+                            Mark as secret (masked in UI)
+                        </label>
+                    </div>
+                    <div class="flex justify-end gap-3 mt-6">
+                        <button type="button" onclick="closeAddVariableModal()"
+                            class="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition-colors">Cancel</button>
+                        <button type="button" id="add-var-save-btn" onclick="saveNewVariable()"
+                            class="px-4 py-2 text-sm font-medium text-white bg-indigo-500 hover:bg-indigo-600 rounded-lg transition-colors disabled:opacity-60 disabled:cursor-not-allowed">Save</button>
+                    </div>
+                </div>
             </div>
             <!-- Plugin Settings Card (dynamic, hidden if no plugin declares agent_settings) -->
             <div id="plugin-settings-card" class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-600 p-6 hidden">
@@ -526,38 +698,109 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
     </div>
 
     <!-- Knowledge Tab -->
-    <div id="tab-knowledge" class="tab-content hidden flex-1 min-h-0 overflow-y-auto">
-        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-600 p-6 max-w-3xl">
-            <div class="flex justify-between items-center mb-4">
-                <h3 class="text-base font-semibold text-gray-800 dark:text-gray-100">Knowledge Base Files</h3>
-                <div class="flex gap-2">
-                    <button onclick="showNewFileModal()" class="bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2 rounded-md text-sm transition-colors">+ New File</button>
-                    <button onclick="toggleKBGraphView()" id="kb-graph-toggle" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2 rounded-md text-sm transition-colors dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600">Graph View</button>
-                    <label class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2 rounded-md text-sm cursor-pointer transition-colors">
-                        Upload
-                        <input type="file" accept=".md,.txt" class="hidden" onchange="uploadFile(this)">
-                    </label>
+    <div id="tab-knowledge" class="tab-content hidden flex-1 min-h-0 relative">
+
+        <!-- Graph View (default, fills entire tab) -->
+        <div id="kb-graph-container" class="absolute inset-0">
+            <div id="kb-graph-svg" class="w-full h-full bg-gray-50 dark:bg-gray-900 rounded-lg"></div>
+
+            <!-- Overlay: Search bar + type filters (top-left, stacked) -->
+            <div class="absolute top-4 left-4 z-10 flex flex-col items-start gap-1.5">
+                <div class="relative">
+                    <input type="text" id="kb-graph-search" placeholder="Search nodes..." autocomplete="off"
+                           class="pl-3 pr-8 py-2 w-48 sm:w-64 bg-white/80 dark:bg-gray-800 backdrop-blur-sm border border-gray-200 dark:border-gray-600 rounded-lg text-sm shadow-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:text-gray-100 dark:placeholder-gray-400"
+                           oninput="searchKBGraph(this.value)">
+                    <button id="kb-graph-search-clear" onclick="clearKBGraphSearch()" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 cursor-pointer hidden" type="button">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                    </button>
+                </div>
+                <div id="kb-type-filters" class="hidden flex flex-col items-start gap-1"></div>
+                <div id="kb-graph-stats" class="hidden flex flex-col items-start gap-0.5 bg-white/80 dark:bg-gray-800 backdrop-blur-sm rounded-lg px-3 py-2 text-xs text-gray-500 dark:text-gray-400 shadow-lg border border-gray-200 dark:border-gray-600">
+                    <span>Last filed: <span id="kb-stat-last-filed">—</span></span>
+                    <span>Last organized: <span id="kb-stat-last-organized">—</span></span>
                 </div>
             </div>
-            <input type="text" id="kb-filter" placeholder="Filter files..." autocomplete="off"
-                   class="w-full p-2.5 border border-gray-300 rounded-md text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 dark:placeholder-gray-400 mb-4"
-                   oninput="filterKBFiles()">
-            <p class="text-xs text-gray-400 mb-4">Files stored in <code>agents/{{ agent.id }}/kb/</code> — the agent can read these using the <code>read("filename.md")</code> tool.</p>
-            <div id="kb-list" class="space-y-2">
-                <!-- Files loaded dynamically -->
+
+            <!-- Overlay: Action buttons (top-right) -->
+            <div class="absolute top-4 right-4 z-10 flex gap-2">
+                <button onclick="showNewFileModal()" class="hidden md:flex bg-indigo-500 hover:bg-indigo-600 text-white px-3 py-2 rounded-lg text-sm shadow-lg transition-colors items-center gap-1.5">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                    New
+                </button>
+                <button onclick="toggleKBGraphView()" id="kb-graph-toggle" class="bg-white/80 dark:bg-gray-800 backdrop-blur-sm hover:bg-white dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 px-3 py-2 rounded-lg text-sm shadow-lg border border-gray-200 dark:border-gray-600 transition-colors flex items-center gap-1.5">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+                    List
+                </button>
+                {% if memory_engine == 'evomem' %}
+                <button onclick="syncKB(this)" id="kb-sync-btn" class="hidden md:block bg-white/80 dark:bg-gray-800 backdrop-blur-sm hover:bg-white dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 px-3 py-2 rounded-lg text-sm shadow-lg border border-gray-200 dark:border-gray-600 transition-colors" title="Force a full evomem memory sync">Sync</button>
+                {% endif %}
+                <label class="hidden md:block bg-white/80 dark:bg-gray-800 backdrop-blur-sm hover:bg-white dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 px-3 py-2 rounded-lg text-sm shadow-lg border border-gray-200 dark:border-gray-600 cursor-pointer transition-colors">
+                    Upload
+                    <input type="file" accept=".md,.txt" class="hidden" onchange="uploadFile(this)">
+                </label>
             </div>
-            <div id="kb-empty" class="hidden text-center py-8 text-gray-400 text-sm">No knowledge files yet.</div>
-            <div id="kb-graph-container" class="hidden" style="height: 70vh; min-height: 400px;">
-                <div id="kb-graph-svg" class="w-full h-full border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800"></div>
-                <div id="kb-graph-legend" class="flex flex-wrap items-center gap-4 mt-2 text-xs text-gray-500 dark:text-gray-400">
-                    <span class="flex items-center gap-1"><span class="inline-block w-3 h-0.5 bg-gray-400 dark:bg-gray-500"></span> Link</span>
-                    <span class="flex items-center gap-1"><span class="inline-block w-3 h-0.5 border-t-2 border-dashed border-red-400"></span> Dangling</span>
-                    <label class="flex items-center gap-1 cursor-pointer">
-                        <input type="checkbox" id="kb-graph-show-orphans" checked onchange="toggleOrphans()">
-                        <span>Show orphans</span>
-                    </label>
+
+            <!-- Overlay: Legend (bottom-left) -->
+            <div id="kb-graph-legend" class="absolute bottom-4 left-4 z-10 flex flex-wrap items-center gap-3 bg-white/80 dark:bg-gray-800 backdrop-blur-sm rounded-lg px-3 py-2 text-xs text-gray-500 dark:text-gray-400 shadow-lg border border-gray-200 dark:border-gray-600">
+                <span class="flex items-center gap-1"><span class="inline-block w-3 h-0.5 bg-gray-400 dark:bg-gray-500"></span> Link</span>
+                <span class="flex items-center gap-1"><span class="inline-block w-3 h-0.5 border-t-2 border-dashed border-red-400"></span> Dangling</span>
+                <label class="flex items-center gap-1 cursor-pointer">
+                    <input type="checkbox" id="kb-graph-show-orphans" checked onchange="toggleOrphans()">
+                    <span>Show orphans</span>
+                </label>
+            </div>
+
+            <!-- Tooltip -->
+            <div id="kb-graph-tooltip" class="absolute hidden bg-gray-900 text-white text-xs px-2 py-1 rounded shadow-lg pointer-events-none z-20 dark:bg-gray-700"></div>
+        </div>
+
+        <!-- List View (hidden by default) -->
+        <div id="kb-list-container" class="hidden overflow-y-auto h-full p-6">
+            <div class="max-w-3xl mx-auto">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="hidden sm:block text-base font-semibold text-gray-800 dark:text-gray-100">Knowledge Base Files</h3>
+                    <div class="flex gap-2">
+                        <button onclick="showNewFileModal()" class="bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2 rounded-md text-sm transition-colors">+ New File</button>
+                        <button onclick="toggleKBGraphView()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2 rounded-md text-sm transition-colors dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600">Graph View</button>
+                        {% if memory_engine == 'evomem' %}
+                        <button onclick="syncKB(this)" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2 rounded-md text-sm transition-colors dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600">Sync</button>
+                        {% endif %}
+                        <label class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2 rounded-md text-sm cursor-pointer transition-colors dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600">
+                            Upload
+                            <input type="file" accept=".md,.txt" class="hidden" onchange="uploadFile(this)">
+                        </label>
+                    </div>
                 </div>
-                <div id="kb-graph-tooltip" class="absolute hidden bg-gray-900 text-white text-xs px-2 py-1 rounded shadow pointer-events-none dark:bg-gray-700"></div>
+                <input type="text" id="kb-filter" placeholder="Filter files..." autocomplete="off"
+                       class="w-full p-2.5 border border-gray-300 rounded-md text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 dark:bg-gray-700 dark:border-gray-600 dark:text-gray-100 dark:placeholder-gray-400 mb-4"
+                       oninput="filterKBFiles()">
+                <p class="text-xs text-gray-400 mb-4">Files stored in <code>agents/{{ agent.id }}/kb/</code> — the agent can read these using <code>read_file(file_path="/_self/kb/filename.md")</code>.</p>
+                <div id="kb-list" class="space-y-2">
+                    <!-- Files loaded dynamically -->
+                </div>
+                <div id="kb-pagination" class="hidden flex items-center justify-between mt-4 pt-3 border-t border-gray-200 dark:border-gray-600">
+                    <div class="text-sm text-gray-500 dark:text-gray-400">
+                        <span id="kb-pagination-info"></span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button id="kb-prev-btn" onclick="goKBPage('prev')"
+                            class="px-3 py-1.5 text-sm font-medium text-gray-600 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors">
+                            <span class="flex items-center gap-1">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
+                                Previous
+                            </span>
+                        </button>
+                        <div class="flex items-center gap-1" id="kb-page-buttons"></div>
+                        <button id="kb-next-btn" onclick="goKBPage('next')"
+                            class="px-3 py-1.5 text-sm font-medium text-gray-600 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors">
+                            <span class="flex items-center gap-1">
+                                Next
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
+                            </span>
+                        </button>
+                    </div>
+                </div>
+                <div id="kb-empty" class="hidden text-center py-8 text-gray-400 text-sm">No knowledge files yet.</div>
             </div>
         </div>
 
@@ -712,6 +955,20 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
         </div>
     </div>
 
+{% for _tab in plugin_agent_tabs %}
+    <div id="tab-{{ _tab.id }}" class="tab-content hidden flex-1 min-h-0 overflow-y-auto"
+        data-endpoint="{{ _tab.endpoint }}">
+        <div class="flex items-center justify-center py-12 text-gray-400" id="tab-{{ _tab.id }}-loading">
+            <svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Loading...
+        </div>
+        <div id="tab-{{ _tab.id }}-content"></div>
+    </div>
+{% endfor %}
+
     <!-- Chat Tab -->
     <div id="tab-chat" class="tab-content flex-1 min-h-0">
         <div class="flex flex-col lg:flex-row gap-4 h-full" style="min-height:0;">
@@ -748,7 +1005,14 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
                         </button>
                     </div>
                 </div>
-                <div class="relative flex-1 flex flex-col min-h-0">
+                <div id="chat-drop-zone" class="relative flex-1 flex flex-col min-h-0">
+                    <!-- Drop overlay -->
+                    <div id="chat-drop-overlay" class="hidden absolute inset-0 z-40 flex items-center justify-center pointer-events-none" style="background:rgba(99,102,241,0.08)">
+                        <div class="border-2 border-dashed border-indigo-400 rounded-xl px-8 py-6 flex flex-col items-center gap-2 bg-white/80 dark:bg-gray-800/80">
+                            <svg class="w-8 h-8 text-indigo-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5"/></svg>
+                            <span class="text-sm font-medium text-indigo-600 dark:text-indigo-400">Drop file here</span>
+                        </div>
+                    </div>
                     <div id="chat-messages" class="flex-1 overflow-y-auto p-4 space-y-3 min-h-0" style="min-height: 300px;">
                         <!-- Messages rendered here -->
                     </div>
@@ -776,20 +1040,55 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
                             <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16ZM8.28 7.22a.75.75 0 0 0-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 1 0 1.06 1.06L10 11.06l1.72 1.72a.75.75 0 1 0 1.06-1.06L11.06 10l1.72-1.72a.75.75 0 0 0-1.06-1.06L10 8.94 8.28 7.22Z" clip-rule="evenodd"/></svg>
                         </button>
                     </div>
+                    <!-- Editor-mode tip (shown on Shift+Enter) -->
+                    <div id="editor-tip" class="hidden mb-2 flex items-center gap-2 px-3 py-1.5 bg-indigo-50 dark:bg-indigo-900/30 border border-indigo-200 dark:border-indigo-800 rounded-lg text-xs text-indigo-700 dark:text-indigo-300">
+                        <svg class="w-4 h-4 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.3 1 2.1V18h6v-1.2c0-.8.4-1.6 1-2.1A7 7 0 0 0 12 2z"/></svg>
+                        <span class="flex-1">Writing something long? <button type="button" onclick="openChatEditorModal()" class="font-medium underline hover:text-indigo-600">Open in editor mode</button></span>
+                        <button type="button" onclick="hideEditorTip()" class="text-indigo-400 hover:text-indigo-600 flex-shrink-0" title="Dismiss">
+                            <svg class="w-3.5 h-3.5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16ZM8.28 7.22a.75.75 0 0 0-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 1 0 1.06 1.06L10 11.06l1.72 1.72a.75.75 0 1 0 1.06-1.06L11.06 10l1.72-1.72a.75.75 0 0 0-1.06-1.06L10 8.94 8.28 7.22Z" clip-rule="evenodd"/></svg>
+                        </button>
+                    </div>
                     <div class="flex gap-2">
                         <input type="file" id="chat-file-input" class="hidden"
                                accept="image/*,.pdf,.txt,.md,.log,.json,.yaml,.yml,.xml,.csv,.tsv,.py,.js,.ts,.tsx,.jsx,.java,.go,.rs,.c,.cpp,.h,.rb,.php,.html,.css,.sql,.sh,.toml,.ini,.zip"
                                onchange="onChatFileSelected(this)">
+                        {% if agent.attachments_enabled %}
                         <button type="button" id="chat-attach-btn" onclick="document.getElementById('chat-file-input').click()"
                                 class="p-2.5 text-gray-400 hover:text-indigo-500 transition-colors flex-shrink-0" title="Attach file">
                             <svg class="w-5 h-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
                         </button>
+                        {% endif %}
                         <textarea id="chat-input" placeholder="Type a message..." rows="1"
                             class="flex-1 p-2.5 border border-gray-300 rounded-md text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 resize-none overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed"
                             style="max-height: 150px;"
                             onkeydown="chatInputKeydown(event)"
                             oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,150)+'px';this.style.overflowY=this.scrollHeight>150?'auto':'hidden'"></textarea>
-                        <button onclick="handleChatBtn()" id="chat-send-btn" class="bg-indigo-500 hover:bg-indigo-600 text-white px-5 py-2 rounded-md text-sm transition-colors">Send</button>
+                        <button onclick="handleChatBtn()" id="chat-send-btn" title="Send" class="bg-indigo-500 hover:bg-indigo-600 text-white p-2.5 rounded-md text-sm transition-colors flex items-center justify-center"><svg class="w-5 h-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg></button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chat Editor Modal (editor mode for composing long messages) -->
+            <div id="chat-editor-modal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-[150] p-4">
+                <div class="bg-white dark:bg-gray-800 rounded-xl w-[90%] max-w-[800px] shadow-xl flex flex-col overflow-hidden" style="max-height: 85vh;">
+                    <div class="flex items-center justify-between px-5 py-3 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+                        <h3 class="text-sm font-semibold text-gray-800 dark:text-gray-200">&#9998; Editor Mode</h3>
+                        <button onclick="closeChatEditorModal()" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700" aria-label="Close editor" title="Close (Esc)">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                        </button>
+                    </div>
+                    <div class="flex-1 min-h-0 flex flex-col p-5">
+                        <textarea id="chat-editor-textarea"
+                            class="flex-1 w-full p-4 text-sm text-gray-800 dark:text-gray-200 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-600 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:focus:ring-indigo-400 focus:border-transparent transition-colors"
+                            style="min-height: 50vh;"
+                            placeholder="Type your message..."></textarea>
+                    </div>
+                    <div class="px-5 py-3 border-t border-gray-200 dark:border-gray-700 flex items-center justify-between flex-shrink-0">
+                        <span class="text-xs text-gray-400 dark:text-gray-500">Esc to close</span>
+                        <div class="flex gap-2">
+                            <button onclick="closeChatEditorModal()" class="px-4 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition-colors">Close</button>
+                            <button onclick="submitChatEditorModal()" class="px-4 py-1.5 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors">Submit</button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -829,6 +1128,8 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
                 </div>
             </div>
         </div>
+    </div>
+    </div>
     </div>
 </div>
 
@@ -889,10 +1190,10 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
         <div class="p-5">
             <div class="mb-4">
                 <label class="block mb-1 text-gray-600 dark:text-gray-300 text-sm font-medium">Filename</label>
-                <input type="text" id="new-file-name" placeholder="e.g., subdir/notes.md" class="w-full p-2.5 border border-gray-300 rounded-md text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 dark:bg-gray-700 dark:text-gray-100">
+                <input type="text" id="new-file-name" placeholder="e.g., subdir/example.md" class="w-full p-2.5 border border-gray-300 rounded-md text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 dark:bg-gray-700 dark:text-gray-100">
             </div>
             <div class="flex gap-3 justify-end">
-                <button onclick="closeNewFileModal()" class="px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-600 hover:bg-gray-50">Cancel</button>
+                <button onclick="closeNewFileModal()" class="px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-600 hover:bg-gray-50 dark:text-gray-200 dark:hover:bg-gray-700 dark:border-gray-600">Cancel</button>
                 <button onclick="createNewFile()" class="px-4 py-2 bg-indigo-500 text-white rounded-md text-sm hover:bg-indigo-600">Create</button>
             </div>
         </div>
@@ -1048,11 +1349,24 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
             <h3 class="text-gray-800 font-semibold dark:text-gray-100">Editing: <span id="kb-editor-filename" class="font-mono text-indigo-600"></span></h3>
             <button onclick="closeEditor()" class="bg-transparent border-none text-gray-400 text-2xl cursor-pointer hover:text-gray-800">&times;</button>
         </div>
-        <div class="p-5 flex-1 overflow-y-auto flex flex-col">
+        <div class="flex border-b border-gray-200 dark:border-gray-700">
+            <button id="kb-tab-preview" onclick="switchKBTab('preview')" 
+                    class="px-4 py-2 text-sm font-medium border-b-2 border-indigo-500 text-indigo-600 transition-colors">
+                Preview
+            </button>
+            <button id="kb-tab-edit" onclick="switchKBTab('edit')" 
+                    class="px-4 py-2 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700 transition-colors">
+                Edit
+            </button>
+        </div>
+        <div id="kb-editor-preview" class="prose text-sm max-w-none p-5 flex-1 overflow-y-auto" 
+             style="max-height: 65vh;">
+        </div>
+        <div id="kb-editor-edit-panel" class="p-5 flex-1 overflow-y-auto flex flex-col hidden">
             <textarea id="kb-editor-content" class="w-full p-3 border border-gray-300 rounded-md text-sm font-mono resize-none focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 dark:bg-gray-700 dark:text-gray-100 dark:border-gray-600" style="min-height: 300px; max-height: 65vh; overflow-y: auto;" oninput="autoGrowKBTextarea(this)"></textarea>
         </div>
         <div class="flex gap-3 justify-end p-5 border-t border-gray-200">
-            <button onclick="closeEditor()" class="px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-600 hover:bg-gray-50 dark:text-gray-200 dark:hover:text-gray-50 dark:hover:bg-gray-400">Cancel</button>
+            <button onclick="closeEditor()" class="px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-600 hover:bg-gray-50 dark:text-gray-200 dark:hover:bg-gray-600 dark:border-gray-600">Cancel</button>
             <button id="saveFileBtn" onclick="saveFile()" class="px-4 py-2 bg-indigo-500 text-white rounded-md text-sm hover:bg-indigo-600 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">Save</button>
         </div>
     </div>
@@ -1083,7 +1397,7 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
                 <input type="text" id="channel-bot-token" placeholder="Telegram bot token" class="w-full p-2.5 border border-gray-300 rounded-md text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 dark:bg-gray-700 dark:text-gray-100">
             </div>
             <div class="flex gap-3 justify-end">
-                <button onclick="closeChannelModal()" class="px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-600 hover:bg-gray-600 dark:text-gray-50">Cancel</button>
+                <button onclick="closeChannelModal()" class="px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-600 hover:bg-gray-50 dark:text-gray-200 dark:hover:bg-gray-600 dark:border-gray-600">Cancel</button>
                 <button onclick="addChannel()" class="px-4 py-2 bg-indigo-500 text-white rounded-md text-sm hover:bg-indigo-600">Add</button>
             </div>
         </div>
@@ -1174,7 +1488,7 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
                 <p class="text-xs text-gray-400 mt-1">The actual filesystem path on the target machine.</p>
             </div>
             <div class="flex gap-3 justify-end">
-                <button onclick="closePortalModal()" class="px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-600 hover:bg-gray-600 dark:text-gray-50">Cancel</button>
+                <button onclick="closePortalModal()" class="px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-600 hover:bg-gray-50 dark:text-gray-200 dark:hover:bg-gray-600 dark:border-gray-600">Cancel</button>
                 <button onclick="savePortal()" class="px-4 py-2 bg-indigo-500 text-white rounded-md text-sm hover:bg-indigo-600">Save</button>
             </div>
         </div>
@@ -1204,6 +1518,35 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
         </div>
         <div class="flex justify-end p-5 border-t border-gray-200 dark:border-gray-700">
             <button onclick="closeQRModal()" class="px-4 py-2 border border-gray-300 rounded-md text-sm text-gray-600 hover:bg-gray-50 dark:text-gray-200 dark:hover:bg-gray-700">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- Drop File Confirmation Modal -->
+<div id="chat-drop-modal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-[200] p-4">
+    <div class="bg-white dark:bg-gray-800 rounded-xl w-[66%] max-w-[420px] shadow-xl flex flex-col" style="max-height:85vh">
+        <div class="flex justify-between items-center p-5 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+            <h3 class="text-gray-800 dark:text-gray-100 font-semibold text-sm">Send File</h3>
+            <button onclick="closeChatDropModal()" class="bg-transparent border-none text-gray-400 text-2xl cursor-pointer hover:text-gray-800 dark:hover:text-gray-200">&times;</button>
+        </div>
+        <div class="p-5 overflow-y-auto flex-1">
+            <div class="flex flex-col items-center gap-3 mb-4">
+                <img id="chat-drop-preview-img" class="hidden rounded-lg object-contain" style="max-width:100%;max-height:min(240px,40vh)" alt="">
+                <div id="chat-drop-preview-file" class="hidden flex items-center gap-2 px-4 py-3 bg-gray-50 dark:bg-gray-700 rounded-lg w-full">
+                    <svg class="w-8 h-8 text-gray-400 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 2l5 5h-5V4zm-3 9h4v2h-4v-2zm0 3h4v2h-4v-2zm-2-3h1v2H8v-2zm0 3h1v2H8v-2z"/></svg>
+                    <div class="min-w-0 flex-1">
+                        <div id="chat-drop-filename" class="text-sm font-medium text-gray-700 dark:text-gray-200 truncate"></div>
+                        <div id="chat-drop-filesize" class="text-xs text-gray-400"></div>
+                    </div>
+                </div>
+            </div>
+            <textarea id="chat-drop-message" placeholder="Add a message (optional)..." rows="1"
+                   class="w-full p-2.5 border border-gray-300 dark:border-gray-600 rounded-md text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 dark:bg-gray-700 dark:text-gray-100 mb-4 resize-none overflow-hidden" style="max-height:150px"
+                   oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,150)+'px';this.style.overflowY=this.scrollHeight>150?'auto':'hidden'"></textarea>
+            <div class="flex gap-3 justify-end">
+                <button onclick="closeChatDropModal()" class="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm text-gray-600 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700">Cancel</button>
+                <button onclick="submitChatDropModal()" class="px-4 py-2 bg-indigo-500 text-white rounded-md text-sm hover:bg-indigo-600">Send</button>
+            </div>
         </div>
     </div>
 </div>
@@ -1271,7 +1614,7 @@ html.dark #system-prompt-modal .hover\:text-gray-600:hover { color: #d1d5db; }
     </div>
 </div>
 
-<script src="{{ url_for('static', filename='js/chat-ui.js') }}?v=53" defer></script>
+<script src="{{ url_for('static', filename='js/chat-ui.js') }}?v=58" defer></script>
 <script src="{{ url_for('static', filename='js/agent-state.js') }}?v=4" defer></script>
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
@@ -1307,6 +1650,8 @@ const BUILTIN_TOOLS_ENABLED = {{ 'true' if agent.builtin_tools_enabled else 'fal
 // Tools managed exclusively by the Artifacts (Saved Files) toggle in agent settings.
 // They are read-only in the Tools tab — cannot be toggled manually.
 const ARTIFACT_TOOL_IDS = ['save_artifact', 'list_artifacts', 'read_attachment', 'cleanup_attachments', 'portal_copy', 'copy_status'];
+const VISION_ENABLED = {{ 'true' if agent.vision_enabled else 'false' }};
+const VISION_TOOL_IDS = ['describe_image'];
 let currentEditFile = null;
 let agentTools = [];
 let chatLoaded = false;
@@ -1454,8 +1799,12 @@ let _chatFullscreenActive = false;
 
 function toggleChatFullscreenMode() {
     const $tab = $('#tab-chat');
-    // The page header and tab bar are the two flex-shrink-0 siblings above #tab-chat
-    const $header = $tab.closest('.flex-col').children('.flex-shrink-0');
+    // Hide/show the page header and tab bar on fullscreen toggle.
+    // Exclude the WhatsApp bridge banner — its visibility is controlled solely
+    // by updateWABridgeBanner() and must NOT be touched by .hide()/.show()
+    // because jQuery's .show() sets inline display:block that overrides the
+    // Tailwind 'hidden' class (inline styles always have higher specificity).
+    const $header = $tab.closest('.flex-col').children('.flex-shrink-0').not('#whatsapp-bridge-banner, #workspace-invalid-banner');
 
     _chatFullscreenActive = !_chatFullscreenActive;
     try { localStorage.setItem('evonic-chat-fullscreen', _chatFullscreenActive ? '1' : '0'); } catch(_) {}
@@ -1508,13 +1857,18 @@ function showTab(name) {
         return;
     }
     $('.tab-content').addClass('hidden');
-    $('.tab-btn').removeClass('border-indigo-500 text-indigo-600')
-                 .addClass('border-transparent text-gray-500');
+    $('.tab-btn').removeClass('active');
     $('#tab-' + name).removeClass('hidden');
-    $(`[data-tab="${name}"]`).addClass('border-indigo-500 text-indigo-600')
-                              .removeClass('border-transparent text-gray-500');
+    $(`[data-tab="${name}"]`).addClass('active');
 
-    if (name === 'knowledge') loadKBFiles();
+    if (name === 'knowledge') {
+        if (kbGraphMode === 'graph') {
+            if (kbGraphData && kbGraphDataEpoch === window._agentEpoch) renderKBGraph();
+            else loadKBGraph();
+        } else {
+            loadKBFiles();
+        }
+    }
     if (name === 'tools') loadTools();
     if (name === 'skills') loadSkills();
     if (name === 'channels') loadChannels();
@@ -1522,6 +1876,11 @@ function showTab(name) {
     if (name === 'artifacts') loadArtifacts();
     if (name === 'general') loadGeneralTabData();
     if (name === 'chat' && !chatLoaded) { loadChatHistory(); refreshSessionState(); }
+
+    const pluginTab = document.getElementById('tab-' + name);
+    if (pluginTab && pluginTab.dataset.endpoint && !pluginTab.dataset.loaded) {
+        loadPluginTab(name, pluginTab.dataset.endpoint);
+    }
 
     if (name === 'chat') {
         enterChatFullscreen();
@@ -1531,6 +1890,68 @@ function showTab(name) {
     }
 
     location.hash = name;
+}
+
+const _pluginTabCache = new Map();
+
+function setPluginTabHTML(contentEl, html) {
+    contentEl.innerHTML = html;
+    // Scripts inserted via innerHTML never execute — recreate them so they do.
+    contentEl.querySelectorAll('script').forEach(old => {
+        const s = document.createElement('script');
+        for (const a of old.attributes) s.setAttribute(a.name, a.value);
+        s.textContent = old.textContent;
+        old.replaceWith(s);
+    });
+}
+
+function refreshPluginTab(name) {
+    _pluginTabCache.delete(name);
+    const tabEl = document.getElementById('tab-' + name);
+    if (!tabEl || !tabEl.dataset.endpoint) return;
+    delete tabEl.dataset.loaded;
+    if (!tabEl.classList.contains('hidden')) {
+        loadPluginTab(name, tabEl.dataset.endpoint);
+    }
+    // else: showTab() re-fetches on next visit since dataset.loaded is unset
+}
+
+function loadPluginTab(name, endpoint) {
+    const loadingEl = document.getElementById('tab-' + name + '-loading');
+    const contentEl = document.getElementById('tab-' + name + '-content');
+
+    // Show loading spinner
+    if (loadingEl) loadingEl.classList.remove('hidden');
+
+    // Check cache first
+    if (_pluginTabCache.has(name)) {
+        if (contentEl) setPluginTabHTML(contentEl, _pluginTabCache.get(name));
+        if (loadingEl) loadingEl.classList.add('hidden');
+        const tabEl = document.getElementById('tab-' + name);
+        if (tabEl) tabEl.dataset.loaded = '1';
+        return;
+    }
+
+    // Resolve {agent_id} placeholder in endpoint
+    const url = endpoint.replace('{agent_id}', AGENT_ID);
+
+    fetch(url)
+        .then(response => {
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            return response.text();
+        })
+        .then(html => {
+            _pluginTabCache.set(name, html);
+            if (contentEl) setPluginTabHTML(contentEl, html);
+            if (loadingEl) loadingEl.classList.add('hidden');
+            const tabEl = document.getElementById('tab-' + name);
+            if (tabEl) tabEl.dataset.loaded = '1';
+        })
+        .catch(err => {
+            console.error('Failed to load plugin tab "' + name + '":', err);
+            if (contentEl) contentEl.innerHTML = '<div class="flex items-center justify-center py-12 text-red-500 text-sm">Failed to load plugin content.</div>';
+            if (loadingEl) loadingEl.classList.add('hidden');
+        });
 }
 
 $(window).on('resize', function () {
@@ -1547,6 +1968,14 @@ function toggleAdvanced() {
 
 // ==================== Agent Variables ====================
 let _agentVariables = [];
+
+// Keys managed by dedicated UI widgets (e.g. the injection-guard toggle), not
+// editable as free-form variable rows. Stored lowercase; the UI force-uppercases
+// user keys, so these must be excluded to avoid case-mismatched duplicates.
+const RESERVED_VAR_KEYS = ['injection_guard_enabled'];
+function isReservedVarKey(key) {
+    return RESERVED_VAR_KEYS.includes((key || '').trim().toLowerCase());
+}
 
 function addVariableRow(key = '', value = '', isSecret = false) {
     const list = document.getElementById('agent-variables-list');
@@ -1577,8 +2006,14 @@ function collectVariables() {
         const key = row.querySelector('.var-key').value.trim().toUpperCase();
         const value = row.querySelector('.var-value').value;
         const isSecret = row.querySelector('.var-secret').checked;
-        if (key) vars.push({ key, value, is_secret: isSecret });
+        if (key && !isReservedVarKey(key)) vars.push({ key, value, is_secret: isSecret });
     });
+    // Always re-emit the toggle-managed injection guard flag (canonical lowercase,
+    // exactly once) so every save path preserves it without ever duplicating it.
+    const guardToggle = document.getElementById('agent-injection-guard');
+    if (guardToggle) {
+        vars.push({ key: 'injection_guard_enabled', value: guardToggle.checked ? '1' : '0', is_secret: false });
+    }
     return vars;
 }
 
@@ -1588,14 +2023,16 @@ async function loadVariables() {
     _agentVariables = data.variables || [];
     const list = document.getElementById('agent-variables-list');
     list.innerHTML = '';
-    _agentVariables.forEach(v => addVariableRow(v.key, v.value, v.is_secret));
+    _agentVariables
+        .filter(v => !isReservedVarKey(v.key))
+        .forEach(v => addVariableRow(v.key, v.value, v.is_secret));
     applyInjectionGuardState(_agentVariables);
 }
 
 // Sets the toggle from already-loaded variables — shares loadVariables()'s
 // fetch instead of issuing a second /variables request.
 function applyInjectionGuardState(vars) {
-    const enabledVar = vars.find(v => v.key === 'injection_guard_enabled');
+    const enabledVar = vars.find(v => (v.key || '').toLowerCase() === 'injection_guard_enabled');
     const toggle = document.getElementById('agent-injection-guard');
     if (toggle) {
         toggle.checked = !enabledVar || enabledVar.value !== '0';
@@ -1622,6 +2059,70 @@ async function saveVariables(silent = false) {
     });
     if (!silent) showToast("Variables saved successfully!", "success");
 }
+
+function openAddVariableModal() {
+    document.getElementById('add-var-key').value = '';
+    document.getElementById('add-var-value').value = '';
+    document.getElementById('add-var-secret').checked = false;
+    document.getElementById('add-var-value').type = 'text';
+    document.getElementById('add-var-save-btn').disabled = false;
+    document.getElementById('add-var-save-btn').textContent = 'Save';
+    document.getElementById('add-var-modal').classList.remove('hidden');
+    setTimeout(function() { document.getElementById('add-var-key').focus(); }, 100);
+}
+
+function closeAddVariableModal() {
+    document.getElementById('add-var-modal').classList.add('hidden');
+}
+
+async function saveNewVariable() {
+    const key = document.getElementById('add-var-key').value.trim().toUpperCase();
+    const value = document.getElementById('add-var-value').value;
+    const isSecret = document.getElementById('add-var-secret').checked;
+    const saveBtn = document.getElementById('add-var-save-btn');
+
+    if (!key) {
+        showToast('Key is required.', 'error');
+        return;
+    }
+
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
+
+    try {
+        const varRes = await fetch(`/api/agents/${AGENT_ID}/variables`);
+        const varData = await varRes.json();
+        const vars = varData.variables || [];
+        if (vars.some(v => v.key === key)) {
+            showToast(`Variable "${key}" already exists.`, 'error');
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            return;
+        }
+        vars.push({ key, value, is_secret: isSecret });
+        await fetch(`/api/agents/${AGENT_ID}/variables`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ variables: vars })
+        });
+        closeAddVariableModal();
+        await loadVariables();
+        showToast('Variable added successfully!', 'success');
+    } catch (e) {
+        showToast('Failed to save variable.', 'error');
+        console.error('Failed to save new variable:', e);
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save';
+    }
+}
+
+// Click-outside to close add variable modal
+document.addEventListener('click', function(e) {
+    const modal = document.getElementById('add-var-modal');
+    if (modal && !modal.classList.contains('hidden') && e.target === modal) {
+        closeAddVariableModal();
+    }
+});
 
 // ==================== Agent Safety Rules (HMADS) ====================
 let _specificRules = [];
@@ -1693,7 +2194,7 @@ async function saveGeneral() {
     const homeSel = document.getElementById('agent-workplace-id');
     const selectedOpt = homeSel ? homeSel.options[homeSel.selectedIndex] : null;
     const homeType = selectedOpt ? selectedOpt.dataset.type : '';
-    const isRemoteOrTunnel = (homeType === 'remote' || homeType === 'tunnel');
+    const sandboxForced = (homeType === 'remote' || homeType === 'tunnel' || homeType === 'bwrap');
     const newWorkspace = document.getElementById('agent-workspace').value || null;
     workspaceChanged = (newWorkspace || null) !== (ORIGINAL_WORKSPACE || null);
     const res = await fetch(`/api/agents/${AGENT_ID}`, {
@@ -1710,7 +2211,7 @@ async function saveGeneral() {
             video_enabled: document.getElementById('agent-video').checked ? 1 : 0,
             attachments_enabled: document.getElementById('agent-attachments').checked ? 1 : 0,
             attachment_max_size_mb: Math.min(20, Math.max(1, parseInt(document.getElementById('agent-attachment-max-mb').value) || 20)),
-            sandbox_enabled: isRemoteOrTunnel ? 0 : (document.getElementById('agent-sandbox').checked ? 1 : 0),
+            sandbox_enabled: sandboxForced ? 0 : (document.getElementById('agent-sandbox').checked ? 1 : 0),
             inject_agent_id: document.getElementById('agent-inject-id').checked ? 1 : 0,
             inject_datetime: document.getElementById('agent-inject-datetime').checked ? 1 : 0,
         })
@@ -1731,6 +2232,7 @@ async function saveGeneral() {
         return;
     }
     showToast("Settings saved successfully!", "success");
+    loadTools();
     } finally {
         if (!workspaceChanged) setSaveLoading(btnId, false);
     }
@@ -1747,10 +2249,14 @@ async function saveAdvanced() {
         body: JSON.stringify({
             summarize_threshold: parseInt(document.getElementById('agent-summarize-threshold').value) || 0,
             summarize_tail: parseInt(document.getElementById('agent-summarize-tail').value) || 5,
-            summarize_prompt: document.getElementById('agent-summarize-prompt').value || null,
+            summarize_prompt: document.getElementById('agent-summarize-prompt-override').checked
+                ? (document.getElementById('agent-summarize-prompt').value || null)
+                : null,
             message_buffer_seconds: parseFloat(document.getElementById('agent-buffer-seconds').value) || 0,
             send_intermediate_responses: document.getElementById('agent-send-intermediate').checked ? 1 : 0,
             enable_agent_state: document.getElementById('agent-state-enabled').checked ? 1 : 0,
+            enable_atg: document.getElementById('agent-atg-enabled').checked ? 1 : 0,
+            enable_cmp: document.getElementById('agent-cmp-enabled').checked ? 1 : 0,
             disable_parallel_tool_execution: document.getElementById('agent-parallel-exec').checked ? 1 : 0,
             disable_turn_prefetch: document.getElementById('agent-prefetch').checked ? 1 : 0,
             agent_messaging_enabled: document.getElementById('agent-messaging-enabled').checked ? 1 : 0,
@@ -1761,27 +2267,20 @@ async function saveAdvanced() {
             bash_exec_enabled: document.getElementById('agent-bash-exec').checked ? 1 : 0,
             message_wrapper_enabled: document.getElementById('agent-message-wrapper').checked ? 1 : 0,
             run_as_user: document.getElementById('agent-run-as-user').value.trim() || null,
+            memory_engine: document.getElementById('agent-memory-engine').value || null,
+            kb_organizer_mode: document.getElementById('agent-kb-organizer').value || null,
         })
     });
     const data = await res.json();
     if (!data.success) { showToast("Failed to save advanced settings.", "error"); return; }
 
-    // Save injection guard state as agent variable
+    // Persist variables + injection guard flag. collectVariables() embeds the
+    // toggle state (canonical lowercase, once), so no manual merge is needed.
     try {
-        const varRes = await fetch(`/api/agents/${AGENT_ID}/variables`);
-        const varData = await varRes.json();
-        const vars = varData.variables || [];
-        const enabled = document.getElementById('agent-injection-guard').checked ? '1' : '0';
-        const existingIdx = vars.findIndex(v => v.key === 'injection_guard_enabled');
-        if (existingIdx >= 0) {
-            vars[existingIdx].value = enabled;
-        } else {
-            vars.push({ key: 'injection_guard_enabled', value: enabled, is_secret: false });
-        }
         await fetch(`/api/agents/${AGENT_ID}/variables`, {
             method: 'PUT',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ variables: vars })
+            body: JSON.stringify({ variables: collectVariables() })
         });
     } catch (e) {
         console.error('Failed to save injection guard state:', e);
@@ -1868,16 +2367,22 @@ async function savePluginSetting(pluginId, name, value) {
 // ==================== Knowledge Tab ====================
 let kbTree = [];
 let kbTreeState = {};
+let _kbPage = 1;
+let _kbPerPage = 30;
 
 async function loadKBFiles() {
+    const epoch = window._agentEpoch;
     const res = await fetch(`/api/agents/${AGENT_ID}/kb`);
     const data = await res.json();
+    if (epoch !== window._agentEpoch) return; // agent switched mid-flight
     kbTree = data.tree || [];
+    _kbPage = 1;
     document.getElementById('kb-filter').value = '';
     renderKBFiles();
 }
 
 function filterKBFiles() {
+    _kbPage = 1;
     renderKBFiles();
 }
 
@@ -1896,58 +2401,61 @@ function renderKBFiles() {
     const empty = document.getElementById('kb-empty');
     const filtering = query.length > 0;
 
-    function nodeHasMatch(node) {
-        if (node.name.toLowerCase().includes(query)) return true;
-        if (node.type === 'dir' && node.children) {
-            return node.children.some(c => nodeHasMatch(c));
-        }
-        return false;
-    }
-
     if (kbTree.length === 0) {
         list.innerHTML = '';
         empty.classList.remove('hidden');
         empty.textContent = 'No knowledge files yet.';
+        renderKBPagination(0);
         return;
     }
     empty.classList.add('hidden');
 
-    function renderNode(node, depth) {
-        const indent = depth * 20;
-        const isDir = node.type === 'dir';
-        const isExpanded = filtering ? true : (kbTreeState[node.path] !== false);
-
-        if (isDir) {
-            const children = node.children || [];
-            const visibleChildren = filtering
-                ? children.filter(c => nodeHasMatch(c))
-                : children;
-            const hasVisible = visibleChildren.length > 0;
-
-            let html = `<div class="flex items-center justify-between p-2 rounded-md cursor-pointer hover:bg-gray-100 transition-colors dark:hover:bg-gray-700 dark:text-gray-300"
-                     style="padding-left: ${indent + 12}px"
-                     onclick="toggleKBDir('${escapeJsPath(node.path)}')">
-                    <div class="flex items-center gap-2 min-w-0">
-                        <span class="text-xs transition-transform inline-block" style="${isExpanded ? 'transform:rotate(90deg)' : ''}">▶</span>
-                        <span class="text-base">📁</span>
-                        <span class="text-sm font-mono text-gray-800 truncate dark:text-gray-200" title="${node.name}">${node.name}/</span>
-                    </div>
-                </div>`;
-
-            if (isExpanded && hasVisible) {
-                html += visibleChildren.map(c => renderNode(c, depth + 1)).join('');
+    // Flatten tree into a flat file list with path prefix for display
+    function flattenFiles(nodes, prefix) {
+        let files = [];
+        for (const node of nodes) {
+            if (node.type === 'dir') {
+                files = files.concat(flattenFiles(node.children || [], prefix + node.name + '/'));
+            } else {
+                files.push({ ...node, displayPrefix: prefix });
             }
-            return html;
-        } else {
-            const ep = escapeJsPath(node.path);
-            const sizeStr = (node.size != null) ? `<span class="text-xs text-gray-400">${(node.size / 1024).toFixed(1)} KB</span>` : '';
-            return `<div class="flex items-center justify-between p-2 rounded-md cursor-pointer hover:bg-gray-100 transition-colors dark:hover:bg-gray-700 dark:text-gray-300"
-                     style="padding-left: ${indent + 12}px"
+        }
+        return files;
+    }
+
+    let allFiles = flattenFiles(kbTree, '');
+
+    if (filtering) {
+        allFiles = allFiles.filter(f =>
+            f.name.toLowerCase().includes(query) ||
+            (f.displayPrefix + f.name).toLowerCase().includes(query)
+        );
+    }
+
+    if (allFiles.length === 0 && filtering) {
+        list.innerHTML = '';
+        empty.classList.remove('hidden');
+        empty.textContent = 'No files match your search';
+        renderKBPagination(0);
+        return;
+    }
+
+    const totalPages = Math.ceil(allFiles.length / _kbPerPage);
+    if (_kbPage > totalPages) _kbPage = totalPages;
+    if (_kbPage < 1) _kbPage = 1;
+    const start = (_kbPage - 1) * _kbPerPage;
+    const pageFiles = allFiles.slice(start, start + _kbPerPage);
+
+    list.innerHTML = pageFiles.map(node => {
+        const ep = escapeJsPath(node.path);
+        const sizeStr = (node.size != null) ? `<span class="text-xs text-gray-400">${(node.size / 1024).toFixed(1)} KB</span>` : '';
+        const prefixStr = node.displayPrefix ? `<span class="text-xs text-gray-400 font-mono">${node.displayPrefix}</span>` : '';
+        return `<div class="flex items-center justify-between p-2 rounded-md cursor-pointer hover:bg-gray-100 transition-colors dark:hover:bg-gray-700 dark:text-gray-300"
                      onclick="editFile('${ep}')">
                     <div class="flex items-center gap-2 min-w-0 flex-1">
-                        <span class="text-base">📄</span>
+                        <span class="text-base flex-shrink-0">📄</span>
                         <div class="flex flex-col min-w-0">
-                            <span class="text-sm font-mono text-gray-800 truncate dark:text-gray-200" title="${node.path}">${node.name}</span>
+                            <span class="text-sm font-mono text-gray-800 truncate dark:text-gray-200" title="${node.path}">${prefixStr}${node.name}</span>
                             ${sizeStr}
                         </div>
                     </div>
@@ -1958,22 +2466,217 @@ function renderKBFiles() {
                         <button onclick="event.stopPropagation(); deleteFile('${ep}')" title="Delete" class="p-1.5 rounded text-red-400 hover:text-red-600 hover:bg-red-50 transition-colors"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4"><path fill-rule="evenodd" d="M8.75 1A2.75 2.75 0 0 0 6 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 1 0 .23 1.482l.149-.022.841 10.518A2.75 2.75 0 0 0 7.596 19h4.807a2.75 2.75 0 0 0 2.742-2.53l.841-10.52.149.023a.75.75 0 0 0 .23-1.482A41.03 41.03 0 0 0 14 4.193V3.75A2.75 2.75 0 0 0 11.25 1h-2.5ZM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4ZM8.58 7.72a.75.75 0 0 0-1.5.06l.3 7.5a.75.75 0 1 0 1.5-.06l-.3-7.5Zm4.34.06a.75.75 0 1 0-1.5-.06l-.3 7.5a.75.75 0 1 0 1.5.06l.3-7.5Z" clip-rule="evenodd"/></svg></button>
                     </div>
                 </div>`;
-        }
-    }
+    }).join('');
 
-    const visible = filtering
-        ? kbTree.filter(n => nodeHasMatch(n))
-        : kbTree;
+    renderKBPagination(allFiles.length);
+}
 
-    if (visible.length === 0 && filtering) {
-        list.innerHTML = '';
-        empty.classList.remove('hidden');
-        empty.textContent = 'No files match your search';
+function renderKBPagination(total) {
+    const pagination = document.getElementById('kb-pagination');
+    const totalPages = Math.ceil(total / _kbPerPage);
+
+    if (totalPages <= 1) {
+        pagination.classList.add('hidden');
         return;
     }
+    pagination.classList.remove('hidden');
 
-    list.innerHTML = visible.map(n => renderNode(n, 0)).join('');
+    document.getElementById('kb-pagination-info').textContent =
+        `Page ${_kbPage} of ${totalPages} (${total} files)`;
+
+    document.getElementById('kb-prev-btn').disabled = _kbPage <= 1;
+    document.getElementById('kb-next-btn').disabled = _kbPage >= totalPages;
+
+    const maxButtons = 5;
+    let startPage = Math.max(1, _kbPage - Math.floor(maxButtons / 2));
+    let endPage = Math.min(totalPages, startPage + maxButtons - 1);
+    if (endPage - startPage < maxButtons - 1) {
+        startPage = Math.max(1, endPage - maxButtons + 1);
+    }
+
+    let html = '';
+    for (let p = startPage; p <= endPage; p++) {
+        const active = p === _kbPage
+            ? 'bg-indigo-600 text-white border-indigo-600'
+            : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-600';
+        html += `<button onclick="goKBPage(${p})" class="w-8 h-8 text-sm font-medium rounded-md border ${active} cursor-pointer transition-colors">${p}</button>`;
+    }
+    document.getElementById('kb-page-buttons').innerHTML = html;
 }
+
+function goKBPage(target) {
+    if (target === 'prev') {
+        if (_kbPage <= 1) return;
+        _kbPage--;
+    } else if (target === 'next') {
+        _kbPage++;
+    } else {
+        _kbPage = target;
+    }
+    renderKBFiles();
+    document.getElementById('kb-list-container').scrollTop = 0;
+}
+
+function switchKBTab(tab) {
+    const previewPanel = document.getElementById('kb-editor-preview');
+    const editPanel = document.getElementById('kb-editor-edit-panel');
+    const previewBtn = document.getElementById('kb-tab-preview');
+    const editBtn = document.getElementById('kb-tab-edit');
+
+    const activeClass = 'border-b-2 border-indigo-500 text-indigo-600';
+    const inactiveClass = 'border-b-2 border-transparent text-gray-500 hover:text-gray-700';
+
+    if (tab === 'edit') {
+        previewPanel.classList.add('hidden');
+        editPanel.classList.remove('hidden');
+        previewBtn.className = previewBtn.className.replace(activeClass, inactiveClass);
+        editBtn.className = editBtn.className.replace(inactiveClass, activeClass);
+        autoGrowKBTextarea(document.getElementById('kb-editor-content'));
+    } else {
+        // Re-render preview from current textarea content
+        const textarea = document.getElementById('kb-editor-content');
+        document.getElementById('kb-editor-preview').innerHTML = renderKBPreview(textarea.value);
+        editPanel.classList.add('hidden');
+        previewPanel.classList.remove('hidden');
+        editBtn.className = editBtn.className.replace(activeClass, inactiveClass);
+        previewBtn.className = previewBtn.className.replace(inactiveClass, activeClass);
+    }
+}
+
+// ── KB doc preview: format frontmatter + render inline [[wiki-links]] ──
+function _kbSplitFrontmatter(content) {
+    const m = (content || '').match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+    if (!m) return { fm: null, body: content || '' };
+    return { fm: m[1], body: m[2] };
+}
+
+function _kbParseFM(raw) {
+    const fm = {};
+    (raw || '').split('\n').forEach(line => {
+        const i = line.indexOf(':');
+        if (i < 0) return;
+        const k = line.slice(0, i).trim();
+        if (!k) return;
+        let v = line.slice(i + 1).trim();
+        if (v.startsWith('[') && v.endsWith(']')) {
+            v = v.slice(1, -1).split(',').map(s => s.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
+        } else {
+            v = v.replace(/^["']|["']$/g, '');
+        }
+        fm[k] = v;
+    });
+    return fm;
+}
+
+function _kbFmtDate(s) {
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? s : d.toLocaleString();
+}
+
+function _kbRenderFrontmatter(raw) {
+    const fm = _kbParseFM(raw);
+    const asList = v => Array.isArray(v) ? v : (v ? [v] : []);
+    const tags = asList(fm.tags), aliases = asList(fm.aliases);
+    const known = new Set(['title', 'type', 'description', 'tags', 'aliases', 'created', 'updated', 'thumbnail']);
+    let h = '<div class="mb-4 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 p-4">';
+    if (fm.thumbnail) {
+        h += '<div class="flex gap-3 mb-2">';
+        h += `<img src="${escapeHtml(fm.thumbnail)}" class="w-16 h-16 rounded-lg object-cover flex-shrink-0 border border-gray-300 dark:border-gray-600" onerror="this.style.display='none'" />`;
+        h += '<div class="flex-1">';
+    }
+    h += '<div class="flex items-center gap-2 flex-wrap mb-1">';
+    if (fm.type) h += `<span class="text-xs font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300">${escapeHtml(fm.type)}</span>`;
+    if (fm.title) h += `<span class="text-base font-semibold text-gray-800 dark:text-gray-100">${escapeHtml(fm.title)}</span>`;
+    h += '</div>';
+    if (fm.description) h += `<p class="text-sm text-gray-600 dark:text-gray-300 mt-1 mb-2">${escapeHtml(fm.description)}</p>`;
+    if (tags.length) h += '<div class="flex flex-wrap gap-1 mb-2">' + tags.map(t => `<span class="text-xs px-2 py-0.5 rounded bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300">#${escapeHtml(t)}</span>`).join('') + '</div>';
+    if (aliases.length) h += `<div class="text-xs text-gray-500 dark:text-gray-400 mb-1">aliases: ${aliases.map(escapeHtml).join(', ')}</div>`;
+    const meta = [];
+    if (fm.created) meta.push('created ' + escapeHtml(_kbFmtDate(fm.created)));
+    if (fm.updated) meta.push('updated ' + escapeHtml(_kbFmtDate(fm.updated)));
+    Object.keys(fm).forEach(k => {
+        if (!known.has(k)) meta.push(`${escapeHtml(k)}: ${escapeHtml(Array.isArray(fm[k]) ? fm[k].join(', ') : fm[k])}`);
+    });
+    if (meta.length) h += `<div class="text-xs text-gray-400 dark:text-gray-500">${meta.join(' · ')}</div>`;
+    if (fm.thumbnail) h += '</div></div>';
+    h += '</div>';
+    return h;
+}
+
+function _kbTransformWikiLinks(body) {
+    return (body || '').replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (m, target, display) => {
+        const t = (target || '').trim();
+        const label = ((display || target) || '').trim();
+        const attr = escapeHtml(t).replace(/"/g, '&quot;');
+        return `<a href="#" class="kb-wikilink text-indigo-600 dark:text-indigo-400 font-medium no-underline hover:underline" data-wikilink="${attr}">${escapeHtml(label)}</a>`;
+    });
+}
+
+function renderKBPreview(content) {
+    const { fm, body } = _kbSplitFrontmatter(content);
+    const cardHtml = fm !== null ? _kbRenderFrontmatter(fm) : '';
+    const bodyHtml = marked.parse(_kbTransformWikiLinks(body));
+    return cardHtml + bodyHtml;
+}
+
+async function openKBLink(title) {
+    if (!kbGraphData || !kbGraphData.pages) {
+        try {
+            const res = await fetch('/api/agents/' + AGENT_ID + '/kb-graph');
+            kbGraphData = await res.json();
+        } catch (e) { /* ignore */ }
+    }
+    const pages = (kbGraphData && kbGraphData.pages) || {};
+    const want = (title || '').trim().toLowerCase();
+    let slug = null;
+    for (const [s, p] of Object.entries(pages)) {
+        const pt = (p.title || '').trim().toLowerCase();
+        if (pt === want || s.toLowerCase() === want || s.split('/').pop().toLowerCase() === want) { slug = s; break; }
+    }
+    if (slug) editFile(slug + '.md');
+    else showToast(`Document "${title}" doesn't exist yet (empty link).`, 'info');
+}
+
+// Delegated click for inline wiki-links in the KB editor preview (attached once).
+(function () {
+    const prev = document.getElementById('kb-editor-preview');
+    if (prev && !prev._wikilinkBound) {
+        prev._wikilinkBound = true;
+        prev.addEventListener('click', function (e) {
+            const a = e.target.closest('.kb-wikilink');
+            if (a) { e.preventDefault(); openKBLink(a.getAttribute('data-wikilink')); return; }
+            const ext = e.target.closest('a[href^="http://"], a[href^="https://"]');
+            if (ext) { e.preventDefault(); window.open(ext.href, '_blank', 'noopener,noreferrer'); }
+        });
+    }
+})();
+
+// Wiki-link clicks from chat messages → preview modal
+document.addEventListener('evonic:wikilink-click', async function (e) {
+    const title = e.detail && e.detail.title;
+    if (!title) return;
+    const fromModal = !!(e.detail && e.detail._fromModal);
+    var slug = null;
+    try {
+        if (!kbGraphData || !kbGraphData.pages) {
+            const res = await fetch('/api/agents/' + AGENT_ID + '/kb-graph');
+            kbGraphData = await res.json();
+        }
+        const pages = (kbGraphData && kbGraphData.pages) || {};
+        const want = title.trim().toLowerCase();
+        for (const [s, p] of Object.entries(pages)) {
+            const pt = (p.title || '').trim().toLowerCase();
+            if (pt === want || s.toLowerCase() === want || s.split('/').pop().toLowerCase() === want) { slug = s; break; }
+        }
+    } catch (err) { /* ignore */ }
+    if (!slug) { showWikilinkPreview(title, null, fromModal); return; }
+    try {
+        const res = await fetch('/api/agents/' + AGENT_ID + '/kb/' + encodeURIComponent(slug + '.md'));
+        const data = await res.json();
+        if (data.error) { showWikilinkPreview(title, null, fromModal); return; }
+        showWikilinkPreview(title, renderKBDocPreview(data.content), fromModal);
+    } catch (err) { showWikilinkPreview(title, null, fromModal); }
+});
 
 async function editFile(filename) {
     const res = await fetch(`/api/agents/${AGENT_ID}/kb/${encodeURIComponent(filename)}`);
@@ -1984,6 +2687,12 @@ async function editFile(filename) {
     document.getElementById('kb-editor-content').value = data.content;
     window.kbEditorOriginalContent = data.content;
     document.getElementById('kb-editor-modal').classList.remove('hidden');
+    // Render preview and show Preview tab by default
+    document.getElementById('kb-editor-preview').innerHTML = renderKBPreview(data.content);
+    document.getElementById('kb-editor-preview').classList.remove('hidden');
+    document.getElementById('kb-editor-edit-panel').classList.add('hidden');
+    document.getElementById('kb-tab-preview').className = 'px-4 py-2 text-sm font-medium border-b-2 border-indigo-500 text-indigo-600 transition-colors';
+    document.getElementById('kb-tab-edit').className = 'px-4 py-2 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700 transition-colors';
     autoGrowKBTextarea(document.getElementById('kb-editor-content'));
 }
 
@@ -2004,23 +2713,36 @@ async function saveFile() {
     setSaveLoading(btnId, true);
     try {
     const content = document.getElementById('kb-editor-content').value;
-    await fetch(`/api/agents/${AGENT_ID}/kb/${encodeURIComponent(currentEditFile)}`, {
+    const resp = await fetch(`/api/agents/${AGENT_ID}/kb/${encodeURIComponent(currentEditFile)}`, {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({content})
     });
+    if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        alert('Could not save: ' + (data.error || resp.statusText));
+        return;  // keep the editor open so the user can fix the frontmatter
+    }
     closeEditor();
     loadKBFiles();
+    kbGraphData = null;
+    if (kbGraphMode === 'graph') loadKBGraph();
     } finally {
         setSaveLoading(btnId, false);
     }
 }
 
-// ESC key to close KB editor modal (with dirty-check)
+// ESC key to close KB editor modal (with dirty-check only when Edit tab is active)
 document.addEventListener('keydown', function(e) {
     if (e.key !== 'Escape') return;
     var modal = document.getElementById('kb-editor-modal');
     if (!modal || modal.classList.contains('hidden')) return;
+    var editPanel = document.getElementById('kb-editor-edit-panel');
+    // If Preview tab is active (edit panel hidden), just close — no dirty-check needed
+    if (editPanel && editPanel.classList.contains('hidden')) {
+        closeEditor();
+        return;
+    }
     var textarea = document.getElementById('kb-editor-content');
     if (!textarea) return;
     if (textarea.value === (window.kbEditorOriginalContent || '')) {
@@ -2042,6 +2764,8 @@ async function deleteFile(filename) {
     await fetch(`/api/agents/${AGENT_ID}/kb/${encodeURIComponent(filename)}`, {method: 'DELETE'});
     if (currentEditFile === filename) closeEditor();
     loadKBFiles();
+    kbGraphData = null;
+    if (kbGraphMode === 'graph') loadKBGraph();
 }
 
 async function uploadFile(input) {
@@ -2052,6 +2776,8 @@ async function uploadFile(input) {
     await fetch(`/api/agents/${AGENT_ID}/kb`, {method: 'POST', body: form});
     input.value = '';
     loadKBFiles();
+    kbGraphData = null;
+    if (kbGraphMode === 'graph') loadKBGraph();
 }
 
 function showNewFileModal() {
@@ -2065,28 +2791,68 @@ function closeNewFileModal() {
 async function createNewFile() {
     const fname = document.getElementById('new-file-name').value.trim();
     if (!fname) return alert('Filename is required.');
-    await fetch(`/api/agents/${AGENT_ID}/kb`, {
+    // Seed mandatory KB frontmatter so the create passes server-side validation.
+    const title = fname.replace(/\.md$/i, '');
+    const template = `---\ntitle: "${title}"\ndescription: "TODO: describe this knowledge file"\ntype: note\n---\n\n`;
+    const resp = await fetch(`/api/agents/${AGENT_ID}/kb`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({filename: fname, content: ''})
+        body: JSON.stringify({filename: fname, content: template})
     });
+    if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        return alert('Failed to create file: ' + (data.error || resp.statusText));
+    }
     closeNewFileModal();
     loadKBFiles();
+    kbGraphData = null;
+    if (kbGraphMode === 'graph') loadKBGraph();
     editFile(fname);
 }
 
 
 // ==================== KB Graph View ====================
-let kbGraphMode = 'list';
+let kbGraphMode = 'graph';
 let kbGraphData = null;
+let kbGraphDataEpoch = -1;
 let kbGraphSimulation = null;
 let kbGraphShowOrphans = true;
+let kbGraphZoom = null;
+let kbGraphSvg = null;
+
+function _kbTimeAgo(epochSec) {
+    if (!epochSec) return 'never';
+    const s = Math.max(0, Math.floor(Date.now() / 1000 - epochSec));
+    if (s < 60) return 'just now';
+    if (s < 3600) return Math.floor(s / 60) + 'm ago';
+    if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+    return Math.floor(s / 86400) + 'd ago';
+}
+
+function _renderKBStats(stats) {
+    const box = document.getElementById('kb-graph-stats');
+    if (!box) return;
+    if (!stats) { box.classList.add('hidden'); return; }
+    const set = (id, ts) => {
+        const el = document.getElementById(id);
+        el.textContent = _kbTimeAgo(ts);
+        el.title = ts ? new Date(ts * 1000).toLocaleString() : '';
+    };
+    set('kb-stat-last-filed', stats.last_filed_at);
+    set('kb-stat-last-organized', stats.last_organized_at);
+    box.classList.remove('hidden');
+}
 
 async function loadKBGraph() {
+    const epoch = window._agentEpoch;
     try {
         const res = await fetch('/api/agents/' + AGENT_ID + '/kb-graph');
         if (res.status === 401) { showToast('Authentication required for graph view', 'error'); return; }
-        kbGraphData = await res.json();
+        const data = await res.json();
+        if (epoch !== window._agentEpoch) return; // agent switched mid-flight
+        kbGraphData = data;
+        kbGraphDataEpoch = epoch;
+        _renderKBStats(data.stats);
         if (kbGraphMode === 'graph') renderKBGraph();
     } catch(e) {
         console.error('Failed to load KB graph:', e);
@@ -2094,39 +2860,165 @@ async function loadKBGraph() {
     }
 }
 
+async function syncKB(btn) {
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Syncing…';
+    try {
+        const res = await fetch('/api/agents/' + AGENT_ID + '/kb-sync', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.ok) {
+            showToast('Memory sync complete', 'success');
+            kbGraphData = null;
+            if (kbGraphMode === 'graph') loadKBGraph();
+        } else {
+            showToast(data.error || 'Memory sync failed', 'error');
+        }
+    } catch(e) {
+        console.error('Failed to sync KB:', e);
+        showToast('Failed to sync memory', 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = original;
+    }
+}
+
 function toggleKBGraphView() {
     const toggleBtn = document.getElementById('kb-graph-toggle');
-    const kbList = document.getElementById('kb-list');
-    const kbEmpty = document.getElementById('kb-empty');
-    const kbFilter = document.getElementById('kb-filter');
     const graphContainer = document.getElementById('kb-graph-container');
+    const listContainer = document.getElementById('kb-list-container');
 
-    if (kbGraphMode === 'list') {
-        kbGraphMode = 'graph';
-        if (toggleBtn) toggleBtn.textContent = 'List View';
-        if (kbList) kbList.classList.add('hidden');
-        if (kbEmpty) kbEmpty.classList.add('hidden');
-        if (kbFilter) kbFilter.classList.add('hidden');
-        if (graphContainer) graphContainer.classList.remove('hidden');
-
-        if (kbGraphData) {
-            renderKBGraph();
-        } else {
-            loadKBGraph();
-        }
-    } else {
+    if (kbGraphMode === 'graph') {
         kbGraphMode = 'list';
-        if (toggleBtn) toggleBtn.textContent = 'Graph View';
-        if (kbList) kbList.classList.remove('hidden');
-        if (kbFilter) kbFilter.classList.remove('hidden');
-        if (graphContainer) graphContainer.classList.add('hidden');
+        if (toggleBtn) toggleBtn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101M10.172 13.828a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg> Graph';
+        graphContainer.classList.add('hidden');
+        listContainer.classList.remove('hidden');
         loadKBFiles();
+    } else {
+        kbGraphMode = 'graph';
+        if (toggleBtn) toggleBtn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg> List';
+        listContainer.classList.add('hidden');
+        graphContainer.classList.remove('hidden');
+        if (kbGraphData) renderKBGraph();
+        else loadKBGraph();
     }
 }
 
 function toggleOrphans() {
     kbGraphShowOrphans = document.getElementById('kb-graph-show-orphans').checked;
     if (kbGraphMode === 'graph' && kbGraphData) renderKBGraph();
+}
+
+let _kbSearchTimer = null;
+let _kbActiveTypeFilters = new Set();
+
+function searchKBGraph(query) {
+    const clearBtn = document.getElementById('kb-graph-search-clear');
+    if (clearBtn) clearBtn.classList.toggle('hidden', !query);
+    clearTimeout(_kbSearchTimer);
+    _kbSearchTimer = setTimeout(() => _applyGraphFilters(), 150);
+}
+
+function clearKBGraphSearch() {
+    const input = document.getElementById('kb-graph-search');
+    if (input) { input.value = ''; input.focus(); }
+    searchKBGraph('');
+}
+
+function toggleTypeFilter(type) {
+    if (_kbActiveTypeFilters.has(type)) _kbActiveTypeFilters.delete(type);
+    else _kbActiveTypeFilters.add(type);
+    _renderTypeFilterChips();
+    _applyGraphFilters();
+}
+
+function _renderTypeFilterChips() {
+    const el = document.getElementById('kb-type-filters');
+    if (!el) return;
+    el.querySelectorAll('[data-type]').forEach(btn => {
+        const t = btn.getAttribute('data-type');
+        const active = _kbActiveTypeFilters.has(t);
+        const color = btn.getAttribute('data-color');
+        if (active) {
+            btn.style.background = color;
+            btn.style.color = '#fff';
+            btn.style.borderColor = color;
+        } else {
+            btn.style.background = '';
+            btn.style.color = '';
+            btn.style.borderColor = '';
+        }
+    });
+}
+
+function _applyGraphFilters() {
+    const svg = d3.select('#kb-graph-svg svg');
+    if (!svg.node()) return;
+
+    const q = (document.getElementById('kb-graph-search').value || '').toLowerCase().trim();
+    const hasSearch = !!q;
+    const hasTypeFilter = _kbActiveTypeFilters.size > 0;
+
+    if (!hasSearch && !hasTypeFilter) {
+        svg.selectAll('.kb-node').classed('kb-node-dimmed', false).classed('kb-node-match', false);
+        svg.selectAll('line').classed('kb-link-dimmed', false);
+        return;
+    }
+
+    const visibleIds = new Set();
+    const searchMatchIds = new Set();
+
+    svg.selectAll('.kb-node').each(function(d) {
+        if (!d) return;
+        const passesType = !hasTypeFilter || _kbActiveTypeFilters.has(d.type);
+        const passesSearch = !hasSearch || (
+            (d.fullTitle || '').toLowerCase().includes(q) ||
+            (d.id || '').toLowerCase().includes(q) ||
+            (d.tags || []).some(t => t.toLowerCase().includes(q)) ||
+            (d.type || '').toLowerCase().includes(q)
+        );
+        if (passesType && passesSearch) visibleIds.add(d.id);
+        if (hasSearch && passesSearch) searchMatchIds.add(d.id);
+    });
+
+    svg.selectAll('.kb-node')
+        .classed('kb-node-dimmed', d => !visibleIds.has(d.id))
+        .classed('kb-node-match', d => hasSearch && searchMatchIds.has(d.id) && visibleIds.has(d.id));
+
+    svg.selectAll('line')
+        .classed('kb-link-dimmed', d => {
+            const srcId = typeof d.source === 'object' ? d.source.id : d.source;
+            const tgtId = typeof d.target === 'object' ? d.target.id : d.target;
+            return !visibleIds.has(srcId) && !visibleIds.has(tgtId);
+        });
+
+    // Pan to first search match
+    if (hasSearch && searchMatchIds.size > 0 && kbGraphZoom && kbGraphSvg) {
+        let target = null;
+        svg.selectAll('.kb-node').each(function(d) {
+            if (!target && visibleIds.has(d.id) && searchMatchIds.has(d.id)) target = d;
+        });
+        if (target && target.x != null && target.y != null) {
+            const container = document.getElementById('kb-graph-container');
+            const w = container.clientWidth;
+            const h = container.clientHeight;
+            const currentTransform = d3.zoomTransform(kbGraphSvg.node());
+            const scale = currentTransform.k;
+            const tx = w / 2 - target.x * scale;
+            const ty = h / 2 - target.y * scale;
+            kbGraphSvg.transition().duration(400)
+                .call(kbGraphZoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+        }
+    }
+}
+
+// Enable/disable the custom summarizer prompt textarea based on the override checkbox.
+function toggleSummarizePromptOverride() {
+    const cb = document.getElementById('agent-summarize-prompt-override');
+    const ta = document.getElementById('agent-summarize-prompt');
+    if (!cb || !ta) return;
+    ta.disabled = !cb.checked;
+    ta.classList.toggle('opacity-50', !cb.checked);
 }
 
 function renderKBGraph() {
@@ -2168,8 +3060,10 @@ function renderKBGraph() {
             label: title,
             fullTitle: page.title || slug,
             tags: tags,
+            type: page.type || null,
             incoming: page.incoming_count || 0,
-            outgoing: page.outgoing_count || 0
+            outgoing: page.outgoing_count || 0,
+            thumbnail: page.thumbnail || null
         });
         nodeMap[slug] = true;
     }
@@ -2177,7 +3071,8 @@ function renderKBGraph() {
     // Add links (only for nodes that are in the graph)
     for (const link of data.links || []) {
         if (nodeMap[link.source] && nodeMap[link.target]) {
-            links.push({ source: link.source, target: link.target, dangling: false });
+            links.push({ source: link.source, target: link.target, dangling: false,
+                         edgeType: link.edge_type || null });
         }
     }
 
@@ -2206,16 +3101,45 @@ function renderKBGraph() {
         return;
     }
 
-    // --- Color scale by top tag ---
-    const tagColors = [
-        '#6366f1', '#ec4899', '#14b8a6', '#f59e0b', '#8b5cf6',
-        '#06b6d4', '#ef4444', '#22c55e', '#3b82f6', '#a855f7'
-    ];
+    // --- Color by KB file `type` ---
     function getNodeColor(node) {
-        if (node.isDangling) return '#ef4444';
-        if (node.tags.length === 0) return '#9ca3af';
-        const h = node.tags[0].split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
-        return tagColors[h % tagColors.length];
+        if (node.isDangling) return '#ef4444';  // dangling stays red
+        switch (node.type) {
+            case 'session':      return '#8b4513';  // brown
+            case 'note':         return '#ffffff';  // white (KB doc)
+            case 'group':        return '#3b82f6';  // blue
+            // entity node types
+            case 'person':       return '#22c55e';  // green
+            case 'place':        return '#14b8a6';  // teal
+            case 'organization': return '#f97316';  // orange
+            case 'venue':        return '#a855f7';  // purple
+            case 'product':      return '#ec4899';  // pink
+            case 'project':      return '#6366f1';  // indigo
+            default:             return '#9ca3af';  // gray fallback
+        }
+    }
+
+    // --- Build type filter chips ---
+    const typeSet = new Set();
+    nodes.forEach(n => { if (n.type) typeSet.add(n.type); });
+    const types = [...typeSet].sort();
+    const filterEl = document.getElementById('kb-type-filters');
+    if (types.length > 1) {
+        filterEl.innerHTML = types.map(t => {
+            const color = getNodeColor({ type: t });
+            const active = _kbActiveTypeFilters.has(t);
+            return '<button onclick="toggleTypeFilter(\'' + t + '\')" data-type="' + t + '" data-color="' + color + '"'
+                + ' class="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border cursor-pointer transition-all'
+                + ' bg-white/80 dark:bg-gray-800 border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300'
+                + ' hover:opacity-80 backdrop-blur-sm shadow-sm"'
+                + (active ? ' style="background:' + color + ';color:#fff;border-color:' + color + '"' : '')
+                + '><span class="inline-block w-2 h-2 rounded-full flex-shrink-0" style="background:' + color + '"></span>'
+                + t + '</button>';
+        }).join('');
+        filterEl.classList.remove('hidden');
+    } else {
+        filterEl.innerHTML = '';
+        filterEl.classList.add('hidden');
     }
 
     // --- D3 setup ---
@@ -2233,6 +3157,8 @@ function renderKBGraph() {
             g.attr('transform', event.transform);
         });
     svg.call(zoom);
+    kbGraphZoom = zoom;
+    kbGraphSvg = svg;
 
     // Dark mode detection
     const isDark = document.documentElement.classList.contains('dark');
@@ -2244,7 +3170,7 @@ function renderKBGraph() {
         .force('link', d3.forceLink(links).id(d => d.id).distance(80))
         .force('charge', d3.forceManyBody().strength(-300))
         .force('center', d3.forceCenter(width / 2, height / 2))
-        .force('collide', d3.forceCollide().radius(30));
+        .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 12));
 
     kbGraphSimulation = simulation;
 
@@ -2258,11 +3184,25 @@ function renderKBGraph() {
         .attr('stroke-dasharray', d => d.dangling ? '5,5' : null)
         .attr('opacity', 0.6);
 
+    // --- Draw typed-edge labels (skip generic 'mentions' to reduce noise) ---
+    const linkLabel = g.append('g')
+        .selectAll('text')
+        .data(links.filter(d => d.edgeType && d.edgeType !== 'mentions'))
+        .join('text')
+        .text(d => d.edgeType)
+        .attr('font-size', '8px')
+        .attr('fill', textColor)
+        .attr('opacity', 0.65)
+        .attr('text-anchor', 'middle')
+        .attr('font-family', 'monospace')
+        .attr('pointer-events', 'none');
+
     // --- Draw nodes ---
     const node = g.append('g')
         .selectAll('g')
         .data(nodes)
         .join('g')
+        .attr('class', 'kb-node')
         .call(d3.drag()
             .on('start', (event, d) => {
                 if (!event.active) simulation.alphaTarget(0.3).restart();
@@ -2280,18 +3220,59 @@ function renderKBGraph() {
             })
         );
 
-    // Node circles
-    node.append('circle')
-        .attr('r', d => d.isDangling ? 5 : 8)
+    // Node circles — size scales with edge count, clamped to [6, 24]
+    function nodeRadius(d) {
+        if (d.isDangling) return 3;
+        const edges = (d.incoming || 0) + (d.outgoing || 0);
+        if (d.thumbnail) {
+            if (edges === 0) return 12;
+            return Math.min(20, 12 + Math.log2(edges) * 2);
+        }
+        if (edges === 0) return 4;
+        return Math.min(10, 4 + Math.log2(edges) * 1.5);
+    }
+
+    // Clip paths for thumbnail nodes
+    const defs = g.append('defs');
+    nodes.filter(d => d.thumbnail).forEach(d => {
+        defs.append('clipPath')
+            .attr('id', 'clip-' + d.id.replace(/[^a-zA-Z0-9-]/g, '_'))
+            .append('circle')
+            .attr('r', nodeRadius(d))
+            .attr('cx', 0).attr('cy', 0);
+    });
+
+    // Thumbnail nodes: image + border
+    node.filter(d => d.thumbnail).each(function(d) {
+        const r = nodeRadius(d);
+        const el = d3.select(this);
+        el.append('image')
+            .attr('href', d.thumbnail)
+            .attr('x', -r).attr('y', -r)
+            .attr('width', r * 2).attr('height', r * 2)
+            .attr('clip-path', 'url(#clip-' + d.id.replace(/[^a-zA-Z0-9-]/g, '_') + ')')
+            .attr('preserveAspectRatio', 'xMidYMid slice')
+            .attr('cursor', 'pointer');
+        el.append('circle')
+            .attr('r', r)
+            .attr('fill', 'none')
+            .attr('stroke', '#fff')
+            .attr('stroke-width', 2)
+            .attr('cursor', 'pointer');
+    });
+
+    // Plain circle nodes (no thumbnail)
+    node.filter(d => !d.thumbnail).append('circle')
+        .attr('r', d => nodeRadius(d))
         .attr('fill', d => getNodeColor(d))
-        .attr('stroke', d => d.isDangling ? '#dc2626' : '#fff')
+        .attr('stroke', d => d.isDangling ? '#dc2626' : (getNodeColor(d) === '#ffffff' ? '#9ca3af' : '#fff'))
         .attr('stroke-width', 1.5)
         .attr('cursor', 'pointer');
 
     // Node labels
     node.append('text')
         .text(d => d.label)
-        .attr('x', 12)
+        .attr('x', d => d.thumbnail ? nodeRadius(d) + 4 : 12)
         .attr('y', 4)
         .attr('font-size', '10px')
         .attr('fill', textColor)
@@ -2302,6 +3283,7 @@ function renderKBGraph() {
     node.on('mouseenter', function(event, d) {
         const title = d.fullTitle;
         const info = [title];
+        if (!d.isDangling) info.push('Type: ' + (d.type || '—'));
         if (d.tags.length > 0) info.push('Tags: ' + d.tags.join(', '));
         info.push('In: ' + d.incoming + ' | Out: ' + d.outgoing);
         if (d.isDangling) info.push('(dangling)');
@@ -2338,19 +3320,16 @@ function renderKBGraph() {
             .attr('x2', d => d.target.x)
             .attr('y2', d => d.target.y);
 
+        linkLabel
+            .attr('x', d => (d.source.x + d.target.x) / 2)
+            .attr('y', d => (d.source.y + d.target.y) / 2);
+
         node.attr('transform', d => 'translate(' + d.x + ',' + d.y + ')');
     });
-}
 
-// Initialize on tab switch
-const _origShowTab = showTab;
-showTab = function(name) {
-    _origShowTab(name);
-    if (name === 'knowledge' && kbGraphMode === 'graph') {
-        if (kbGraphData) renderKBGraph();
-        else loadKBGraph();
-    }
-};
+    // Re-apply active filters after re-render
+    setTimeout(() => _applyGraphFilters(), 50);
+}
 
 // Debounced resize handler for graph
 let _kbGraphResizeTimer = null;
@@ -2368,12 +3347,16 @@ let assignedToolIds = [];
 let currentFilterMode = 'assigned';
 
 async function loadTools() {
+    const epoch = window._agentEpoch;
     const [toolsRes, agentToolsRes] = await Promise.all([
         fetch('/api/settings/tools'),
         fetch(`/api/agents/${AGENT_ID}/tools`)
     ]);
-    allToolsDefs = (await toolsRes.json()).tools || [];
-    assignedToolIds = (await agentToolsRes.json()).tools || [];
+    const toolsDefs = (await toolsRes.json()).tools || [];
+    const assigned = (await agentToolsRes.json()).tools || [];
+    if (epoch !== window._agentEpoch) return; // agent switched mid-flight
+    allToolsDefs = toolsDefs;
+    assignedToolIds = assigned;
     renderToolsList();
 }
 
@@ -2398,10 +3381,13 @@ function renderToolsList() {
 
     const sortByName = (a, b) => (a.name || a.id).localeCompare(b.name || b.id);
     const isArtifactTool = (t) => ARTIFACT_TOOL_IDS.includes(t.id);
+    const isVisionTool = (t) => VISION_TOOL_IDS.includes(t.id);
+    const isLockedTool = (t) => isArtifactTool(t) || isVisionTool(t);
     const builtins  = BUILTIN_TOOLS_ENABLED ? allToolsDefs.filter(t => t._builtin).sort(sortByName) : [];
-    const assigned  = allToolsDefs.filter(t => !t._builtin && !isArtifactTool(t) && isToolAssigned(t.id)).sort(sortByName);
-    const available = allToolsDefs.filter(t => !t._builtin && !isArtifactTool(t) && !isToolAssigned(t.id)).sort(sortByName);
+    const assigned  = allToolsDefs.filter(t => !t._builtin && !isLockedTool(t) && isToolAssigned(t.id)).sort(sortByName);
+    const available = allToolsDefs.filter(t => !t._builtin && !isLockedTool(t) && !isToolAssigned(t.id)).sort(sortByName);
     const artifactTools = allToolsDefs.filter(t => isArtifactTool(t)).sort(sortByName);
+    const visionTools = allToolsDefs.filter(t => isVisionTool(t)).sort(sortByName);
 
     let html = '';
 
@@ -2451,6 +3437,7 @@ function renderToolsList() {
                     <span class="text-sm font-medium text-gray-800 dark:text-gray-200">${escapeHtml(t.name || t.id)}</span>
                     ${isBuiltin ? '<span class="text-xs bg-green-50 text-green-600 px-1.5 py-0.5 rounded">builtin</span>' : ''}
                     ${t._skill_id ? `<span class="text-xs bg-indigo-50 text-indigo-500 px-1.5 py-0.5 rounded">${escapeHtml(t._skill_id)}</span>` : ''}
+                    ${t._plugin_id ? `<span class="text-xs bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded">${escapeHtml(t._plugin_id)}</span>` : ''}
                 </div>
                 <p class="text-xs text-gray-400 font-mono mt-0.5">${safeId}</p>
                 <p class="text-xs text-gray-500 mt-0.5">${escapeHtml(t.description || '')}</p>
@@ -2500,6 +3487,43 @@ function renderToolsList() {
                     </svg>
                     <span class="text-sm font-medium text-gray-800 dark:text-gray-200">${escapeHtml(t.name || t.id)}</span>
                     ${t._skill_id ? `<span class="text-xs bg-indigo-50 text-indigo-500 px-1.5 py-0.5 rounded">${escapeHtml(t._skill_id)}</span>` : ''}
+                    ${t._plugin_id ? `<span class="text-xs bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded">${escapeHtml(t._plugin_id)}</span>` : ''}
+                </div>
+                <p class="text-xs text-gray-400 font-mono mt-0.5">${safeId}</p>
+                <p class="text-xs text-gray-500 mt-0.5">${escapeHtml(t.description || '')}</p>
+            </div>
+            <label class="relative flex-shrink-0 ml-3 cursor-not-allowed"
+                   onclick="event.stopPropagation()"
+                   title="${lockLabel}">
+                <input type="checkbox" ${isChecked ? 'checked' : ''} disabled
+                       class="sr-only peer">
+                <span class="dyn-toggle opacity-60"></span>
+            </label>
+        </div>`;
+        }).join('');
+    }
+
+    // Vision tools — locked, managed by the Vision (Image Recognition) toggle in agent settings
+    if (visionTools.length > 0) {
+        const lockLabel = VISION_ENABLED ? 'Vision is ON — managed by Settings' : 'Vision is OFF — managed by Settings';
+        html += visionTools.map(t => {
+            const safeId = escapeHtml(t.id);
+            const isChecked = VISION_ENABLED;
+            return `
+        <div class="tool-row flex items-center justify-between p-3 bg-gray-50 border border-gray-200 rounded-md cursor-pointer dark:bg-gray-800 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"
+             data-assigned="false"
+             data-builtin="false"
+             data-locked="true"
+             data-tool-id="${safeId}"
+             onclick="showToolDetail('${safeId}')">
+            <div class="min-w-0 flex-1 overflow-hidden">
+                <div class="flex flex-wrap items-center gap-1.5">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4 text-gray-400 flex-shrink-0">
+                        <path fill-rule="evenodd" d="M10 1a4.5 4.5 0 00-4.5 4.5V9H5a2 2 0 00-2 2v6a2 2 0 002 2h10a2 2 0 002-2v-6a2 2 0 00-2-2h-.5V5.5A4.5 4.5 0 0010 1zm3 8V5.5a3 3 0 10-6 0V9h6z" clip-rule="evenodd"/>
+                    </svg>
+                    <span class="text-sm font-medium text-gray-800 dark:text-gray-200">${escapeHtml(t.name || t.id)}</span>
+                    ${t._skill_id ? `<span class="text-xs bg-indigo-50 text-indigo-500 px-1.5 py-0.5 rounded">${escapeHtml(t._skill_id)}</span>` : ''}
+                    ${t._plugin_id ? `<span class="text-xs bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded">${escapeHtml(t._plugin_id)}</span>` : ''}
                 </div>
                 <p class="text-xs text-gray-400 font-mono mt-0.5">${safeId}</p>
                 <p class="text-xs text-gray-500 mt-0.5">${escapeHtml(t.description || '')}</p>
@@ -2556,6 +3580,7 @@ function filterToolsList() {
                 tool ? (tool.name || tool.id) : toolId,
                 tool ? (tool.description || '') : '',
                 tool ? (tool._skill_id || '') : '',
+                tool ? (tool._plugin_id || '') : '',
                 toolId
             ].join(' ').toLowerCase();
             show = searchable.includes(query);
@@ -2587,6 +3612,11 @@ async function toggleTool(toolId) {
     // Artifact tools are managed exclusively by the Artifacts toggle in agent settings
     if (ARTIFACT_TOOL_IDS.includes(toolId)) {
         showToast('Artifact tools are managed by the Artifacts toggle in agent settings (Advanced tab).', 'info');
+        return;
+    }
+    // Vision tools are managed exclusively by the Vision toggle in agent settings
+    if (VISION_TOOL_IDS.includes(toolId)) {
+        showToast('Vision tools are managed by the Vision (Image Recognition) toggle in Settings tab.', 'info');
         return;
     }
     const tool = allToolsDefs.find(t => t.id === toolId);
@@ -2650,13 +3680,17 @@ let allSkillsDefs = [];
 let allowedSkillIds = [];
 
 async function loadSkills() {
+    const epoch = window._agentEpoch;
     const [skillsRes, agentSkillsRes] = await Promise.all([
         fetch('/api/skills'),
         fetch(`/api/agents/${AGENT_ID}/skills`)
     ]);
     const skillsData = await skillsRes.json();
-    allSkillsDefs = (skillsData.skills || []).filter(s => s.enabled);
-    allowedSkillIds = (await agentSkillsRes.json()).skills || [];
+    const defs = (skillsData.skills || []).filter(s => s.enabled);
+    const allowed = (await agentSkillsRes.json()).skills || [];
+    if (epoch !== window._agentEpoch) return; // agent switched mid-flight
+    allSkillsDefs = defs;
+    allowedSkillIds = allowed;
     renderSkillsList();
 }
 
@@ -2815,10 +3849,13 @@ async function showToolDetail(toolId) {
         document.getElementById('tool-detail-id').textContent = tool.id;
         document.getElementById('tool-detail-desc').textContent = tool.description || 'No description';
 
-        // Skill / builtin badge
+        // Skill / plugin / builtin badge
         const skillBadge = document.getElementById('tool-detail-skill');
         if (tool._skill_id) {
             skillBadge.textContent = tool._skill_id;
+            skillBadge.classList.remove('hidden');
+        } else if (tool._plugin_id) {
+            skillBadge.textContent = tool._plugin_id;
             skillBadge.classList.remove('hidden');
         } else if (tool._builtin) {
             skillBadge.textContent = 'builtin';
@@ -3002,9 +4039,12 @@ async function testToolExec(mode) {
 
 // ==================== Channels Tab ====================
 async function loadChannels() {
+    const epoch = window._agentEpoch;
     const res = await fetch(`/api/agents/${AGENT_ID}/channels`);
     const data = await res.json();
+    if (epoch !== window._agentEpoch) return; // agent switched mid-flight
     const channels = data.channels || [];
+    updateWABridgeBanner(channels);
     const list = document.getElementById('channels-list');
     const empty = document.getElementById('channels-empty');
     if (channels.length === 0) {
@@ -3133,7 +4173,7 @@ function closeQRModal() {
 
 function _startQRPolling() {
     _stopQRPolling();
-    _qrPollInterval = setInterval(_pollQR, 3000);
+    _qrPollInterval = setInterval(_pollQR, 10000);
     _pollQR(); // immediate first call
 }
 
@@ -3170,6 +4210,66 @@ async function _pollQR() {
         // ignore poll errors
     }
 }
+
+// ---- WhatsApp bridge status banner ----
+let _waBannerChannelId = null;
+
+function updateWABridgeBanner(channels) {
+    const banner = document.getElementById('whatsapp-bridge-banner');
+    if (!banner) return;
+    const wa = (channels || []).find(c =>
+        c.type === 'whatsapp' && c.running && c.bridge_status && c.bridge_status !== 'connected');
+    if (wa) {
+        _waBannerChannelId = wa.id;
+        document.getElementById('wa-bridge-banner-text').textContent =
+            wa.bridge_status === 'qr_pending'
+                ? 'WhatsApp is waiting for a QR scan — messages will not be received.'
+                : 'WhatsApp is not connected — messages will not be received.';
+        banner.classList.remove('hidden');
+    } else {
+        _waBannerChannelId = null;
+        banner.classList.add('hidden');
+    }
+}
+
+function reconnectWhatsApp() {
+    if (_waBannerChannelId) openQRModal(_waBannerChannelId);
+}
+
+async function refreshWABridgeBanner() {
+    try {
+        const res = await fetch(`/api/agents/${AGENT_ID}/channels`);
+        if (!res.ok) return;
+        const data = await res.json();
+        updateWABridgeBanner(data.channels || []);
+    } catch (_) { /* silent — never break the page */ }
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    refreshWABridgeBanner();
+    setInterval(refreshWABridgeBanner, 60000); // fallback when SSE is unavailable
+    // Shared realtime client is created by agent-sidebar.js after this handler runs
+    let bindTries = 0;
+    (function bindWABridgeRT() {
+        if (window._evRealtime) {
+            window._evRealtime.on('status', 'whatsapp_bridge_status', function (payload) {
+                if (payload && payload.agent_id === AGENT_ID) refreshWABridgeBanner();
+            });
+            window._evRealtime.on('status', 'panel_updated', function (payload) {
+                if (payload && payload.agent_id === AGENT_ID) refreshPluginTab('panel');
+            });
+            // Busy state pushed by the unified status stream — replaces the old
+            // 5s /busy poll. _chatBusy (this session's own turn) takes precedence.
+            window._evRealtime.on('status', 'agent_busy_changed', function (payload) {
+                if (payload && payload.agent_id === AGENT_ID && !_chatBusy) {
+                    updateBusyBadge(payload.busy);
+                }
+            });
+        } else if (++bindTries < 10) {
+            setTimeout(bindWABridgeRT, 1000);
+        }
+    })();
+});
 
 async function toggleChannel(channelId, start) {
     const action = start ? 'start' : 'stop';
@@ -3693,28 +4793,33 @@ function setChatBusy(busy) {
     }
 }
 
-// Background poll for busy state set by external sessions (notifier, other channels)
+// One-shot busy-state resync (external sessions: notifier, other channels).
+// Live updates arrive via the shared status stream (agent_busy_changed); this
+// only fetches the current snapshot on load / after a soft agent switch.
 let _busyPolling = false;
-let _busyPollTimer = setInterval(async () => {
-    if (_chatBusy || _busyPolling) return; // skip if already busy or previous request still in-flight
+async function resyncBusyBadge() {
+    if (_chatBusy || _busyPolling) return; // skip if own turn is busy or a fetch is in-flight
     _busyPolling = true;
     try {
         const res = await fetch(`/api/agents/${AGENT_ID}/busy`);
         const data = await res.json();
-        updateBusyBadge(data.busy);
+        if (!_chatBusy) updateBusyBadge(data.busy);
     } catch (e) { /* ignore */ } finally { _busyPolling = false; }
-}, 5000);
+}
+resyncBusyBadge(); // initial state; the stream covers everything after this
 
 // Stop all polling on page unload to free HTTP connections during navigation
 window.addEventListener('beforeunload', () => {
-    if (_busyPollTimer) { clearInterval(_busyPollTimer); _busyPollTimer = null; }
     stopIdlePoll();
 });
 
 function startIdlePoll() {
     if (chatIdleTimer) return; // already running
     chatIdleTimer = setInterval(async () => {
-        if (_chatBusy || chatUI.hasActiveStream()) return; // skip during active turn or SSE stream
+        // Skip during user-initiated busy state, or when there's an SSE stream
+        // that's NOT from the idle poll (tracked via _pollThinkingId).
+        if (_chatBusy) return;
+        if (chatUI.hasActiveStream() && !_pollThinkingId) return;
         try {
             const sid = await _getChatSessionId();
             const qs = sid
@@ -3722,7 +4827,10 @@ function startIdlePoll() {
                 : `user_id=web_test&after_ts=${lastChatTs}&limit=20`;
             const res = await fetch(`/api/agents/${AGENT_ID}/chat?${qs}`);
             const data = await res.json();
-            if (_chatBusy || chatUI.hasActiveStream()) return; // re-check: user may have sent a message while fetching
+            // Re-check: user may have sent a message while fetching.
+            // Don't block if the only active stream is our own idle-poll bubble.
+            if (_chatBusy) return;
+            if (chatUI.hasActiveStream() && !_pollThinkingId) return;
             const entries = data.entries || [];
             if (!entries.length) return;
             const wasAtBottom = chatUI.isNearBottom(80);
@@ -3754,19 +4862,74 @@ function stopIdlePoll() {
 const CHAT_DESKTOP_BREAKPOINT = 1024;
 function chatInputKeydown(event) {
     if (event.key !== 'Enter') return;
+    if (event.shiftKey) {
+        // Shift+Enter inserts a newline natively; offer the editor-mode tip for long messages.
+        showEditorTip();
+        return;
+    }
     const isDesktop = window.innerWidth >= CHAT_DESKTOP_BREAKPOINT;
-    if (isDesktop && !event.shiftKey) {
+    if (isDesktop) {
         // Desktop: Enter alone submits the message
         event.preventDefault();
         sendChat();
     }
     // Mobile: Enter does nothing special — textarea handles newline natively.
-    // Shift+Enter on desktop: also falls through — textarea inserts newline natively.
 }
 
 function handleChatBtn() {
     sendChat();
 }
+
+// ==================== Editor Mode ====================
+
+function showEditorTip() {
+    const tip = document.getElementById('editor-tip');
+    if (tip) tip.classList.remove('hidden');
+}
+function hideEditorTip() {
+    const tip = document.getElementById('editor-tip');
+    if (tip) tip.classList.add('hidden');
+}
+
+// Open the editor-mode modal, pre-filled with the current chat input text.
+function openChatEditorModal() {
+    const input = document.getElementById('chat-input');
+    const ta = document.getElementById('chat-editor-textarea');
+    ta.value = input.value;
+    document.getElementById('chat-editor-modal').classList.remove('hidden');
+    hideEditorTip();
+    setTimeout(function () { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }, 50);
+}
+
+// Cancel: close the modal and move the edited text back into the regular chat input.
+function closeChatEditorModal() {
+    const input = document.getElementById('chat-input');
+    const ta = document.getElementById('chat-editor-textarea');
+    input.value = ta.value;
+    document.getElementById('chat-editor-modal').classList.add('hidden');
+    input.dispatchEvent(new Event('input')); // trigger auto-grow
+    input.focus();
+}
+
+// Submit: copy the edited text into the chat input and send it to the agent.
+function submitChatEditorModal() {
+    const input = document.getElementById('chat-input');
+    const ta = document.getElementById('chat-editor-textarea');
+    input.value = ta.value;
+    document.getElementById('chat-editor-modal').classList.add('hidden');
+    hideEditorTip();
+    sendChat();
+}
+
+// Esc cancels the editor modal (moving text back into the chat input).
+document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    const modal = document.getElementById('chat-editor-modal');
+    if (modal && !modal.classList.contains('hidden')) {
+        e.preventDefault();
+        closeChatEditorModal();
+    }
+});
 
 // ==================== File Upload Helpers ====================
 
@@ -3805,6 +4968,131 @@ function clearChatFileInput() {
     if (previewImg.src) { URL.revokeObjectURL(previewImg.src); previewImg.src = ''; }
 }
 
+// ==================== Drag & Drop File Upload ====================
+
+let _dragCounter = 0;
+let _droppedFile = null;
+
+function _formatFileSize(size) {
+    if (size < 1024) return `${size} B`;
+    if (size < 1048576) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / 1048576).toFixed(1)} MB`;
+}
+
+function _isFileAccepted(file) {
+    const accept = document.getElementById('chat-file-input').getAttribute('accept') || '';
+    const exts = accept.split(',').map(s => s.trim().toLowerCase());
+    if (exts.some(e => e === 'image/*') && file.type.startsWith('image/')) return true;
+    const fname = file.name.toLowerCase();
+    return exts.some(e => e.startsWith('.') && fname.endsWith(e));
+}
+
+(function initChatDropZone() {
+    const zone = document.getElementById('chat-drop-zone');
+    if (!zone) return;
+    const overlay = document.getElementById('chat-drop-overlay');
+
+    zone.addEventListener('dragenter', function(e) {
+        e.preventDefault();
+        _dragCounter++;
+        if (_dragCounter === 1) overlay.classList.remove('hidden');
+    });
+    zone.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+    });
+    zone.addEventListener('dragleave', function(e) {
+        e.preventDefault();
+        _dragCounter--;
+        if (_dragCounter <= 0) { _dragCounter = 0; overlay.classList.add('hidden'); }
+    });
+    zone.addEventListener('drop', function(e) {
+        e.preventDefault();
+        _dragCounter = 0;
+        overlay.classList.add('hidden');
+        const file = e.dataTransfer.files[0];
+        if (!file) return;
+        if (!_isFileAccepted(file)) {
+            if (typeof showToast === 'function') showToast('File type not supported', true);
+            return;
+        }
+        openChatDropModal(file);
+    });
+})();
+
+function openChatDropModal(file) {
+    _droppedFile = file;
+    const modal = document.getElementById('chat-drop-modal');
+    const previewImg = document.getElementById('chat-drop-preview-img');
+    const previewFile = document.getElementById('chat-drop-preview-file');
+    const msgInput = document.getElementById('chat-drop-message');
+
+    msgInput.value = (document.getElementById('chat-input') || {}).value || '';
+
+    if (file.type.startsWith('image/')) {
+        previewImg.src = URL.createObjectURL(file);
+        previewImg.classList.remove('hidden');
+        previewFile.classList.add('hidden');
+    } else {
+        previewImg.classList.add('hidden');
+        previewFile.classList.remove('hidden');
+        document.getElementById('chat-drop-filename').textContent = file.name;
+        document.getElementById('chat-drop-filesize').textContent = _formatFileSize(file.size);
+    }
+    modal.classList.remove('hidden');
+    setTimeout(() => {
+        msgInput.focus();
+        msgInput.style.height = 'auto';
+        msgInput.style.height = Math.min(msgInput.scrollHeight, 150) + 'px';
+    }, 50);
+}
+
+function closeChatDropModal() {
+    const modal = document.getElementById('chat-drop-modal');
+    modal.classList.add('hidden');
+    const previewImg = document.getElementById('chat-drop-preview-img');
+    if (previewImg.src) { URL.revokeObjectURL(previewImg.src); previewImg.src = ''; }
+    _droppedFile = null;
+}
+
+function submitChatDropModal() {
+    if (!_droppedFile) return;
+    const msgInput = document.getElementById('chat-drop-message');
+    const chatInput = document.getElementById('chat-input');
+    const fileInput = document.getElementById('chat-file-input');
+
+    // Set message text if provided
+    if (msgInput.value.trim()) chatInput.value = msgInput.value.trim();
+
+    // Inject dropped file into the file input
+    const dt = new DataTransfer();
+    dt.items.add(_droppedFile);
+    fileInput.files = dt.files;
+
+    closeChatDropModal();
+    sendChat();
+}
+
+// Allow Enter to submit the drop modal (Shift+Enter inserts a newline)
+document.addEventListener('keydown', function(e) {
+    if (e.key !== 'Enter' || e.shiftKey) return;
+    const modal = document.getElementById('chat-drop-modal');
+    if (modal && !modal.classList.contains('hidden')) {
+        e.preventDefault();
+        submitChatDropModal();
+    }
+});
+
+// Allow Escape to close the drop modal
+document.addEventListener('keydown', function(e) {
+    if (e.key !== 'Escape') return;
+    const modal = document.getElementById('chat-drop-modal');
+    if (modal && !modal.classList.contains('hidden')) {
+        e.preventDefault();
+        closeChatDropModal();
+    }
+});
+
 function stopChat() {
     _destroyCurrentTurn();
     if (chatPollTimer) {
@@ -3823,7 +5111,19 @@ async function sendChat() {
     if (!msg && !file) return;
     input.value = '';
     input.style.height = 'auto';
+    input.style.overflowY = 'hidden';
+    // Re-apply height reset after async input event (queued by value='') fires.
+    // The oninput handler may set height from a stale scrollHeight before the
+    // browser has reflowed the now-empty textarea.
+    requestAnimationFrame(function() {
+        if (!input.value) {
+            input.style.height = 'auto';
+            input.style.overflowY = 'hidden';
+        }
+    });
     window._clearChatDraft();
+    hideEditorTip();
+    if (file) clearChatFileInput();
 
     // Build optimistic metadata for image/file preview
     let optimisticMeta = null;
@@ -3835,6 +5135,7 @@ async function sendChat() {
     const displayText = msg || (file ? (file.type.startsWith('image/') ? '[Image]' : `[File: ${file.name}]`) : '');
 
     const $msgEl = chatUI.appendMessage('user', displayText, {metadata: optimisticMeta});
+    if (file) chatUI.markMessageUploading($msgEl);
     // Capture the user message wrapper for anchoring the thinking bubble
     const container = document.getElementById('chat-messages');
     const userWrappers = container ? container.querySelectorAll('[data-msg-role="user"]') : [];
@@ -3842,31 +5143,44 @@ async function sendChat() {
     chatUI.scrollToBottom();
     setChatBusy(true);
 
-    // Build fetch options based on whether we have a file
-    let fetchOpts;
-    if (file) {
-        const formData = new FormData();
-        formData.append('message', msg);
-        formData.append('user_id', 'web_test');
-        formData.append('file', file);
-        fetchOpts = { method: 'POST', body: formData };
-    } else {
-        fetchOpts = {
+    // Post chat message — uses XHR for file uploads (progress tracking), fetch otherwise
+    function postChat(url, signal) {
+        if (file) {
+            const formData = new FormData();
+            formData.append('message', msg);
+            formData.append('user_id', 'web_test');
+            formData.append('file', file);
+            return new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', url);
+                xhr.upload.addEventListener('progress', function(e) {
+                    if (e.lengthComputable) chatUI.updateUploadProgress($msgEl, Math.round(e.loaded / e.total * 100));
+                });
+                xhr.onload = function() {
+                    chatUI.markMessageUploadDone($msgEl);
+                    try { resolve(JSON.parse(xhr.responseText)); }
+                    catch(e) { reject(new Error('Invalid JSON response')); }
+                };
+                xhr.onerror = function() { chatUI.markMessageUploadDone($msgEl); reject(new Error('Network error')); };
+                if (signal) signal.addEventListener('abort', () => xhr.abort());
+                xhr.send(formData);
+            });
+        }
+        return fetch(url, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({message: msg, user_id: 'web_test'}),
-        };
+            signal,
+        }).then(r => r.json());
     }
 
     // If an SSE stream is already active, the agent is mid-turn — inject the message
     if (chatUI.hasActiveStream()) {
         try {
-            const res = await fetch(`/api/agents/${AGENT_ID}/chat`, fetchOpts);
-            const data = await res.json();
+            const data = await postChat(`/api/agents/${AGENT_ID}/chat`);
             if (data.injected) {
                 chatUI.markLastUserBubbleQueued();
                 setChatBusy(false);
-                if (file) clearChatFileInput();
                 return;
             }
             if (!data.success) {
@@ -3885,7 +5199,6 @@ async function sendChat() {
             chatUI.appendMessage('error', 'Network error: ' + e.message);
         }
         setChatBusy(false);
-        if (file) clearChatFileInput();
         setTimeout(refreshSessionState, 0);
         setTimeout(refreshAgentState, 1000);
         return;
@@ -3936,14 +5249,9 @@ async function sendChat() {
         );
     }
 
-    // Add signal to fetchOpts if this is a plain object (not FormData)
-    if (!file) fetchOpts.signal = signal;
-
     try {
-        const res = await fetch(`/api/agents/${AGENT_ID}/chat`, fetchOpts);
-        const data = await res.json();
+        const data = await postChat(`/api/agents/${AGENT_ID}/chat`, signal);
         if (data.buffered) {
-            if (file) clearChatFileInput();
             pollForResponse(thinkingId);
             return;
         } else if (data.injected) {
@@ -3968,6 +5276,7 @@ async function sendChat() {
             chatUI.closeStream();
             const cmdMeta = data.bash_exec ? { bash_exec: true } : { slash_command: true };
             chatUI.appendMessage('assistant', data.response, { metadata: cmdMeta });
+            chatUI.scrollToBottom();
             await syncLastChatTs();
         } else {
             // Non-buffered success: agent responded immediately.
@@ -4005,7 +5314,6 @@ async function sendChat() {
         chatUI.appendMessage('error', 'Network error: ' + e.message);
     }
     setChatBusy(false);
-    if (file) clearChatFileInput();
     // Refresh summary and agent state after response completes
     setTimeout(refreshSessionState, 0);
     setTimeout(refreshAgentState, 1000);
@@ -4272,6 +5580,45 @@ function closeMobileChatSummary() {
     document.getElementById('mobile-chat-summary-overlay').classList.add('hidden');
 }
 
+// Render the "Background Processes" section for the Session State panel.
+// Shared shape with sessions.html — spinner while running, ✓/✗ when done.
+// A "process" is a live thing — only running jobs are shown. Once a job
+// exits (done/timeout/failed) it drops off the list entirely, and rows are
+// styled as terminal command lines (mono + prompt glyph + live dot) so they
+// don't read like the checkbox/checkmark Task list.
+function buildBgProcessesHtml(procs) {
+    if (!Array.isArray(procs)) return '';
+    const running = procs.filter(p => p && p.status === 'running');
+    if (running.length === 0) return '';
+    const liveDot = '<span class="relative flex h-2 w-2 flex-shrink-0"><span class="absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-60 animate-ping"></span><span class="relative inline-flex h-2 w-2 rounded-full bg-green-500"></span></span>';
+    let html = '<div class="mt-2"><div class="text-gray-500 dark:text-gray-400 font-medium mb-1 text-xs uppercase tracking-wide">Background Processes</div><ul class="space-y-1">';
+    for (const p of running) {
+        const secs = Math.max(0, Math.floor(Date.now() / 1000 - p.started_at));
+        const elapsed = secs < 60 ? `${secs}s` : (secs < 3600 ? `${Math.floor(secs / 60)}m` : `${Math.floor(secs / 3600)}h${Math.floor((secs % 3600) / 60)}m`);
+        html += `<li class="flex items-center gap-1.5">${liveDot}<span class="text-green-500 dark:text-green-400 font-mono text-[11px] flex-shrink-0 select-none">❯</span><span class="font-mono text-[11px] text-gray-700 dark:text-gray-200 truncate" title="${esc(p.command)}">${esc(p.command)}</span><span class="font-mono text-[10px] text-gray-400 dark:text-gray-500 flex-shrink-0 ml-auto tabular-nums">${esc(elapsed)}</span></li>`;
+    }
+    html += '</ul></div>';
+    return html;
+}
+
+// Render the "Context" usage block for the Session State panel: how much of
+// the model's context window the last LLM call consumed. cu = {used, max,
+// percent} from /chat/state; max/percent are null when the window is unknown.
+function buildContextUsageHtml(cu) {
+    if (!cu || !cu.used) return '';
+    const fmt = n => n >= 1000000 ? (n / 1000000).toFixed(1) + 'M' : (n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
+    let label, barHtml = '';
+    if (cu.max) {
+        const pct = Math.min(100, cu.percent || 0);
+        const color = pct > 85 ? 'bg-red-500' : (pct >= 60 ? 'bg-amber-500' : 'bg-indigo-500');
+        label = `${fmt(cu.used)} / ${fmt(cu.max)} (${pct}%)`;
+        barHtml = `<div class="w-full h-1.5 bg-gray-200 dark:bg-gray-600 rounded-full mt-1 overflow-hidden"><div class="h-1.5 ${color} rounded-full transition-all" style="width:${pct}%"></div></div>`;
+    } else {
+        label = `~${fmt(cu.used)} tokens`;
+    }
+    return `<div class="mb-3 pb-3 border-b border-gray-100 dark:border-gray-700"><div class="flex justify-between items-center"><span class="text-gray-500 dark:text-gray-400 font-medium text-xs uppercase tracking-wide">Context</span><span class="text-[10px] text-gray-400 dark:text-gray-500 tabular-nums">${label}</span></div>${barHtml}</div>`;
+}
+
 let _refreshSessionStateTimer = null;
 const _refreshSessionStateImpl = async function() {
     try {
@@ -4292,6 +5639,7 @@ const _refreshSessionStateImpl = async function() {
 
         // Build mode badge + plan file + tasks header from agent state
         let headerHtml = '';
+        headerHtml += buildContextUsageHtml(stateData.context_usage);
         if (stateData.mode) {
             const modeColor = stateData.mode === 'execute' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700';
             headerHtml += `<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${modeColor}">${esc(stateData.mode)}</span> `;
@@ -4315,6 +5663,7 @@ const _refreshSessionStateImpl = async function() {
             }
             headerHtml += '</ul></div>';
         }
+        headerHtml += buildBgProcessesHtml(stateData.background_processes);
 
         // Build skill badges from agent state
         const skills = Array.isArray(stateData.loaded_skills) ? stateData.loaded_skills : [];
@@ -4460,6 +5809,12 @@ function updateChatPanelTitle(connectionStatus) {
         badge.className = 'inline-flex items-center text-[10px] font-semibold px-1.5 py-0.5 rounded border flex-shrink-0 ' + (isDisconnected
             ? 'bg-gray-100 text-gray-500 border-blue-300 dark:bg-gray-700 dark:text-gray-400 dark:border-blue-700'
             : 'bg-blue-100 text-blue-700 border-blue-300 dark:bg-blue-900/20 dark:text-blue-400 dark:border-blue-700');
+    } else if (homeType === 'bwrap') {
+        badge.classList.remove('hidden');
+        badge.textContent = 'Bwrap';
+        badge.className = 'inline-flex items-center text-[10px] font-semibold px-1.5 py-0.5 rounded border flex-shrink-0 ' + (isDisconnected
+            ? 'bg-gray-100 text-gray-500 border-amber-300 dark:bg-gray-700 dark:text-gray-400 dark:border-amber-700'
+            : 'bg-amber-100 text-amber-700 border-amber-300 dark:bg-amber-900/20 dark:text-amber-400 dark:border-amber-700');
     } else {
         badge.textContent = '';
         badge.className = 'hidden';
@@ -4474,10 +5829,13 @@ function updateSandboxVisibility() {
     if (!sel || !sandboxInput || !sandboxWarning || !sandboxLabel) return;
     const selectedOpt = sel.options[sel.selectedIndex];
     const homeType = selectedOpt ? selectedOpt.dataset.type : '';
-    if (homeType === 'remote' || homeType === 'tunnel') {
+    if (homeType === 'remote' || homeType === 'tunnel' || homeType === 'bwrap') {
         sandboxInput.disabled = true;
         sandboxInput.checked = false;
         sandboxLabel.classList.add('opacity-50', 'cursor-not-allowed');
+        sandboxWarning.textContent = homeType === 'bwrap'
+            ? 'Docker Sandbox is disabled — isolation is provided by the bwrap workplace.'
+            : '⚠ Docker Sandbox only available for local workplace.';
         sandboxWarning.classList.remove('hidden');
     } else {
         sandboxInput.disabled = false;
@@ -4570,11 +5928,12 @@ loadWorkplaceSelector();
 setInterval(pollWorkplaceStatus, 5000);
 
 // ==================== Tab persistence ====================
-// Restore tab from URL hash on page load (same pattern as settings.html)
+// Restore tab from URL hash on page load (same pattern as settings.html).
+// Validity is checked against the rendered tab buttons so plugin tabs count too.
 (function() {
-    const valid = ['chat', 'general', 'knowledge', 'tools', 'skills', 'channels', 'portals', 'artifacts'];
     const hash = location.hash.replace('#', '');
-    window._tabInitHash = (hash && valid.includes(hash)) ? hash : 'chat';
+    const isValid = hash && document.querySelector('.tab-btn[data-tab="' + CSS.escape(hash) + '"]');
+    window._tabInitHash = isValid ? hash : 'chat';
     if (window._tabInitHash !== 'chat') {
         showTab(window._tabInitHash);
     }
@@ -4606,14 +5965,17 @@ let _artifactsFilterType = 'all';
 let _artifactsPage = 1;
 let _artifactsPages = 1;
 let _artifactsTotal = 0;
+let _artifactRawContent = null;
 
 async function loadArtifacts() {
     const sort = document.getElementById('artifacts-sort').value;
     const q = document.getElementById('artifacts-search').value.trim();
     const type = _artifactsFilterType;
+    const epoch = window._agentEpoch;
     try {
         const res = await fetch(`/api/agents/${AGENT_ID}/artifacts?sort=${sort}&page=${_artifactsPage}&limit=24&q=${encodeURIComponent(q)}&type=${encodeURIComponent(type)}`);
         const data = await res.json();
+        if (epoch !== window._agentEpoch) return; // agent switched mid-flight
         _artifactsData = data.files || [];
         _artifactsPages = data.pages || 1;
         _artifactsTotal = data.total || 0;
@@ -4799,6 +6161,10 @@ function openArtifact(filename, category) {
                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
                         Download
                     </a>
+                    <button onclick="copyArtifactContent(this)" class="flex items-center gap-1.5 px-3 py-1.5 text-xs text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 rounded-md transition-colors" title="Copy content">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+                        Copy
+                    </button>
                     <button onclick="closeArtifactViewer()" class="flex items-center justify-center w-8 h-8 rounded-md text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors" title="Close">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                     </button>
@@ -4824,6 +6190,36 @@ function closeArtifactViewer() {
     document.removeEventListener('keydown', _artifactViewerEscHandler);
 }
 
+async function copyArtifactContent(btn) {
+    if (!_artifactRawContent) {
+        showToast('No content to copy.', 'warning');
+        return;
+    }
+    try {
+        await navigator.clipboard.writeText(_artifactRawContent);
+    } catch(e) {
+        // Fallback for older browsers or non-HTTPS
+        const textarea = document.createElement('textarea');
+        textarea.value = _artifactRawContent;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+    }
+    // Visual feedback
+    const origHTML = btn.innerHTML;
+    btn.innerHTML = '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg> Copied!';
+    btn.classList.add('text-green-600', 'dark:text-green-400');
+    btn.classList.remove('text-indigo-600', 'dark:text-indigo-400');
+    setTimeout(() => {
+        btn.innerHTML = origHTML;
+        btn.classList.remove('text-green-600', 'dark:text-green-400');
+        btn.classList.add('text-indigo-600', 'dark:text-indigo-400');
+    }, 2000);
+}
+
 function _artifactViewerEscHandler(e) {
     if (e.key === 'Escape') closeArtifactViewer();
 }
@@ -4837,6 +6233,7 @@ async function renderArtifactContent(filename, category, fileUrl, ext) {
             // Fetch and render markdown
             const res = await fetch(fileUrl);
             const text = await res.text();
+            _artifactRawContent = text;
             body.innerHTML = '<div class="recap-prose max-w-none">' + marked.parse(text) + '</div>';
         } else if (ext === 'pdf') {
             // Embed PDF viewer
@@ -4881,6 +6278,7 @@ async function renderArtifactContent(filename, category, fileUrl, ext) {
             // Plain text / code viewer
             const res = await fetch(fileUrl);
             const text = await res.text();
+            _artifactRawContent = text;
             const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
             body.innerHTML = `<pre class="bg-gray-50 dark:bg-gray-900 rounded-md p-4 text-sm text-gray-800 dark:text-gray-200 overflow-x-auto max-h-[70vh] whitespace-pre-wrap font-mono">${escaped}</pre>`;
         } else {
@@ -5065,8 +6463,10 @@ async function toggleEnabled() {
 let _portalEditingId = null;
 
 async function loadPortals() {
+    const epoch = window._agentEpoch;
     const res = await fetch(`/api/agents/${AGENT_ID}/portals`);
     const data = await res.json();
+    if (epoch !== window._agentEpoch) return; // agent switched mid-flight
     const portals = data.portals || [];
     const list = document.getElementById('portals-list');
     const empty = document.getElementById('portals-empty');
@@ -5388,7 +6788,7 @@ window.softSwitchAgent = async function (newId, opts = {}) {
     if (window._saveChatDraft) window._saveChatDraft(); // persists under the OLD agent's key
     _destroyCurrentTurn();
     stopIdlePoll();
-    updateBusyBadge(false); // _busyPollTimer refreshes for the new agent within 5s
+    updateBusyBadge(false); // cleared now; resynced for the new agent below
     const gearDd = document.getElementById('gear-dropdown');
     if (gearDd) gearDd.classList.add('hidden');
     if (_qrPollInterval) closeQRModal();
@@ -5405,6 +6805,22 @@ window.softSwitchAgent = async function (newId, opts = {}) {
     _planEditorFetchedFor = null;
     _planEditorOriginal = null;
     window.chatUI = _createChatUI();
+
+    // Reset KB state so the Knowledge tab doesn't show stale data
+    kbGraphData = null;
+    kbGraphDataEpoch = -1;
+    kbTree = [];
+    kbTreeState = {};
+
+    // Plugin tabs cache the previous agent's HTML — drop it so the next open re-fetches
+    _pluginTabCache.clear();
+    document.querySelectorAll('.tab-content[data-endpoint]').forEach(function (el) {
+        delete el.dataset.loaded;
+        const content = document.getElementById(el.id + '-content');
+        if (content) content.innerHTML = '';
+        const loading = document.getElementById(el.id + '-loading');
+        if (loading) loading.classList.remove('hidden');
+    });
 
     // --- Update server-rendered header bits ---
     const nameEl = document.getElementById('agent-header-name');
@@ -5452,6 +6868,7 @@ window.softSwitchAgent = async function (newId, opts = {}) {
         history.pushState({agentId: newId}, '', '/agents/' + encodeURIComponent(newId) + '#chat');
     }
     window._softSwitched = true;
+    resyncBusyBadge(); // fetch the new agent's current busy state; live updates via stream
     showTab('chat'); // chatLoaded=false → loads new agent's history/session/state
     return true;
 };
@@ -5745,5 +7162,216 @@ document.addEventListener('keydown', function(e) {
     </div>
 </div>
 
+
+<!-- Messaging Access Control Modal -->
+<div id="messaging-acl-modal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-[150]" onclick="if(event.target===this)closeMessagingAclModal()">
+    <div class="bg-white dark:bg-gray-800 rounded-xl w-[90%] max-w-[480px] shadow-xl flex flex-col overflow-hidden" style="max-height: 80vh;">
+        <div class="flex items-center justify-between px-5 py-3 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+            <h3 class="text-sm font-semibold text-gray-800 dark:text-gray-200">Messaging Access Control</h3>
+            <button onclick="closeMessagingAclModal()" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700" aria-label="Close">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div class="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
+            <!-- Mode selector -->
+            <div>
+                <label class="block mb-2 text-gray-600 dark:text-gray-300 text-sm font-medium">Mode</label>
+                <div class="flex gap-2">
+                    <button type="button" id="acl-mode-whitelist" onclick="setAclMode('whitelist')"
+                        class="flex-1 px-3 py-2 text-sm font-medium rounded-lg border transition-colors">
+                        Whitelist
+                    </button>
+                    <button type="button" id="acl-mode-blacklist" onclick="setAclMode('blacklist')"
+                        class="flex-1 px-3 py-2 text-sm font-medium rounded-lg border transition-colors">
+                        Blacklist
+                    </button>
+                </div>
+                <p id="acl-mode-desc" class="text-xs text-gray-400 mt-1.5"></p>
+            </div>
+            <!-- Search -->
+            <div>
+                <label class="block mb-1 text-gray-600 dark:text-gray-300 text-sm font-medium">Add Agent</label>
+                <div class="relative">
+                    <input type="text" id="acl-search-input" placeholder="Search agents..." autocomplete="off"
+                        oninput="aclSearchAgents()" onfocus="aclSearchAgents()"
+                        class="w-full p-2.5 border border-gray-300 rounded-lg text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 dark:bg-gray-700 dark:text-gray-100 dark:border-gray-600">
+                    <div id="acl-search-dropdown" class="hidden absolute left-0 right-0 top-full mt-1 bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg shadow-lg max-h-48 overflow-y-auto z-10">
+                    </div>
+                </div>
+            </div>
+            <!-- Agent list -->
+            <div>
+                <label class="block mb-1 text-gray-600 dark:text-gray-300 text-sm font-medium">Agents in list</label>
+                <div id="acl-agent-list" class="space-y-1.5">
+                    <p id="acl-empty-msg" class="text-xs text-gray-400 text-center py-3">No agents added — all agents are allowed.</p>
+                </div>
+            </div>
+        </div>
+        <div class="px-5 py-3 border-t border-gray-200 dark:border-gray-700 flex justify-end gap-2 flex-shrink-0">
+            <button onclick="closeMessagingAclModal()" class="px-4 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition-colors">Cancel</button>
+            <button onclick="saveMessagingAcl()" id="acl-save-btn" class="px-4 py-1.5 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 rounded-lg transition-colors">Save</button>
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    let _aclMode = {{ (agent.messaging_acl_mode or 'whitelist') | tojson }};
+    let _aclList = [];
+    try { _aclList = JSON.parse({{ (agent.messaging_acl or '[]') | tojson }}) || []; } catch(e) { _aclList = []; }
+    let _allAgents = [];
+    let _aclAgentNames = {};
+
+    window.openMessagingAclModal = async function() {
+        const modal = document.getElementById('messaging-acl-modal');
+        modal.classList.remove('hidden');
+        try {
+            const [agentsRes, agentRes] = await Promise.all([
+                fetch('/api/agents'),
+                fetch('/api/agents/' + AGENT_ID)
+            ]);
+            const agentsData = await agentsRes.json();
+            _allAgents = (agentsData.agents || agentsData || []).filter(a => a.id !== AGENT_ID && !a.is_super);
+            _allAgents.forEach(a => { _aclAgentNames[a.id] = a.name || a.id; });
+            const agentData = await agentRes.json();
+            if (agentData.id) {
+                try { _aclList = agentData.messaging_acl ? JSON.parse(agentData.messaging_acl) : []; } catch(e) { _aclList = []; }
+                _aclMode = agentData.messaging_acl_mode || 'whitelist';
+            }
+        } catch(e) { _allAgents = []; }
+        setAclMode(_aclMode);
+        renderAclList();
+        document.getElementById('acl-search-input').value = '';
+        document.getElementById('acl-search-dropdown').classList.add('hidden');
+    };
+
+    window.closeMessagingAclModal = function() {
+        document.getElementById('messaging-acl-modal').classList.add('hidden');
+    };
+
+    window.setAclMode = function(mode) {
+        _aclMode = mode;
+        const wBtn = document.getElementById('acl-mode-whitelist');
+        const bBtn = document.getElementById('acl-mode-blacklist');
+        const desc = document.getElementById('acl-mode-desc');
+        if (mode === 'whitelist') {
+            wBtn.className = 'flex-1 px-3 py-2 text-sm font-medium rounded-lg border border-indigo-500 bg-indigo-50 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-400 transition-colors';
+            bBtn.className = 'flex-1 px-3 py-2 text-sm font-medium rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors';
+            desc.textContent = 'Only agents in this list can be messaged. Leave empty to allow all.';
+        } else {
+            bBtn.className = 'flex-1 px-3 py-2 text-sm font-medium rounded-lg border border-indigo-500 bg-indigo-50 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-400 transition-colors';
+            wBtn.className = 'flex-1 px-3 py-2 text-sm font-medium rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors';
+            desc.textContent = 'Agents in this list are blocked from being messaged. All others are allowed.';
+        }
+        renderAclList();
+    };
+
+    function renderAclList() {
+        const container = document.getElementById('acl-agent-list');
+        const emptyMsg = _aclMode === 'whitelist'
+            ? 'No agents added — all agents are allowed.'
+            : 'No agents added — no agents are blocked.';
+        if (!_aclList.length) {
+            container.innerHTML = '<p class="text-xs text-gray-400 text-center py-3">' + emptyMsg + '</p>';
+            return;
+        }
+        container.innerHTML = _aclList.map(id => {
+            const name = _aclAgentNames[id] || id;
+            return '<div class="flex items-center justify-between px-3 py-2 bg-gray-50 dark:bg-gray-700/50 rounded-lg">'
+                + '<div class="flex items-center gap-2 min-w-0">'
+                + '<span class="text-sm text-gray-700 dark:text-gray-200 truncate">' + escapeHtml(name) + '</span>'
+                + '<span class="text-xs text-gray-400 font-mono">' + escapeHtml(id) + '</span>'
+                + '</div>'
+                + '<button onclick="aclRemoveAgent(\'' + escapeHtml(id) + '\')" class="text-gray-400 hover:text-red-500 transition-colors flex-shrink-0 p-0.5" title="Remove">'
+                + '<svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>'
+                + '</button>'
+                + '</div>';
+        }).join('');
+    }
+
+    window.aclSearchAgents = function() {
+        const query = (document.getElementById('acl-search-input').value || '').toLowerCase().trim();
+        const dropdown = document.getElementById('acl-search-dropdown');
+        const available = _allAgents.filter(a => !_aclList.includes(a.id));
+        let filtered = available;
+        if (query) {
+            filtered = available.filter(a =>
+                (a.name || '').toLowerCase().includes(query) ||
+                a.id.toLowerCase().includes(query)
+            );
+        }
+        if (!filtered.length) {
+            dropdown.classList.add('hidden');
+            return;
+        }
+        dropdown.innerHTML = filtered.slice(0, 20).map(a =>
+            '<button type="button" onclick="aclAddAgent(\'' + escapeHtml(a.id) + '\',\'' + escapeHtml(a.name || a.id) + '\')"'
+            + ' class="w-full text-left px-3 py-2 text-sm hover:bg-indigo-50 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 transition-colors flex items-center gap-2">'
+            + '<span class="truncate">' + escapeHtml(a.name || a.id) + '</span>'
+            + '<span class="text-xs text-gray-400 font-mono flex-shrink-0">' + escapeHtml(a.id) + '</span>'
+            + '</button>'
+        ).join('');
+        dropdown.classList.remove('hidden');
+    };
+
+    window.aclAddAgent = function(id, name) {
+        if (!_aclList.includes(id)) {
+            _aclList.push(id);
+            _aclAgentNames[id] = name;
+        }
+        document.getElementById('acl-search-input').value = '';
+        document.getElementById('acl-search-dropdown').classList.add('hidden');
+        renderAclList();
+    };
+
+    window.aclRemoveAgent = function(id) {
+        _aclList = _aclList.filter(x => x !== id);
+        renderAclList();
+    };
+
+    window.saveMessagingAcl = async function() {
+        const btn = document.getElementById('acl-save-btn');
+        btn.disabled = true;
+        btn.textContent = 'Saving...';
+        try {
+            const res = await fetch('/api/agents/' + AGENT_ID, {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    messaging_acl: _aclList.length ? _aclList : null,
+                    messaging_acl_mode: _aclMode
+                })
+            });
+            const data = await res.json();
+            if (!data.success) {
+                showToast('Failed to save ACL: ' + (data.error || 'Unknown error'), 'error');
+                return;
+            }
+            showToast('Messaging access control saved!', 'success');
+            closeMessagingAclModal();
+        } catch(e) {
+            showToast('Failed to save ACL.', 'error');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Save';
+        }
+    };
+
+    function escapeHtml(s) {
+        const d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    }
+
+    // Close dropdown on click outside
+    document.addEventListener('click', function(e) {
+        const dropdown = document.getElementById('acl-search-dropdown');
+        const input = document.getElementById('acl-search-input');
+        if (dropdown && input && !dropdown.contains(e.target) && e.target !== input) {
+            dropdown.classList.add('hidden');
+        }
+    });
+})();
+</script>
 
 {% endblock %}

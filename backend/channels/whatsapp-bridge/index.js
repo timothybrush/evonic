@@ -20,6 +20,71 @@ let sock = null;
 let currentQR = null;
 let connectionStatus = 'disconnected'; // 'disconnected' | 'qr_pending' | 'connected'
 let isShuttingDown = false;
+let botId = '';   // PN-based JID (e.g. 628xxx:1@s.whatsapp.net)
+let botLid = '';  // LID-based JID (e.g. 123456:1@lid)
+let lastPushedStatus = '';
+
+// Reconnect control — a single-socket guard prevents overlapping sockets from
+// fighting over one credential set (which WhatsApp punishes with a conflict/401
+// that used to wipe the session). Only one restart is ever pending at a time.
+let reconnectAttempts = 0;
+let restartScheduled = false;
+// Set when WhatsApp reports connectionReplaced (440). A 401 arriving right after
+// a replace is conflict fallout — NOT a genuine logout — so we must not wipe on it.
+let sawReplaced = false;
+const BASE_RECONNECT_MS = 3000;
+const MAX_RECONNECT_MS = 60000;
+
+// Group/sender context caches (in-memory; repopulate after restart)
+const groupMetaCache = new Map(); // groupJid -> { subject, ts }
+const GROUP_META_TTL_MS = 60 * 60 * 1000;
+const pushNameCache = new Map(); // senderDigits -> pushName
+
+async function getGroupSubject(jid) {
+    const cached = groupMetaCache.get(jid);
+    if (cached && Date.now() - cached.ts < GROUP_META_TTL_MS) return cached.subject;
+    try {
+        const meta = await sock.groupMetadata(jid);
+        const subject = meta?.subject || null;
+        groupMetaCache.set(jid, { subject, ts: Date.now() });
+        return subject;
+    } catch (e) {
+        console.error('[whatsapp-bridge] Failed to fetch group metadata for %s: %s', jid, e.message);
+        return cached ? cached.subject : null;
+    }
+}
+
+function pushStatus() {
+    if (!CALLBACK_URL || isShuttingDown) return;
+    if (connectionStatus === lastPushedStatus) return;
+    lastPushedStatus = connectionStatus;
+    postCallback({ event: 'status', status: connectionStatus });
+}
+
+// Schedule exactly one reconnect with exponential backoff. The restartScheduled
+// guard ensures a burst of 'close' events can never fan out into multiple
+// concurrent sockets. startBaileys() tears down the previous socket first.
+function scheduleRestart() {
+    if (restartScheduled || isShuttingDown) return;
+    restartScheduled = true;
+    const delay = Math.min(BASE_RECONNECT_MS * 2 ** reconnectAttempts, MAX_RECONNECT_MS);
+    reconnectAttempts += 1;
+    console.log('[whatsapp-bridge] Reconnecting in %dms (attempt %d)', delay, reconnectAttempts);
+    setTimeout(() => {
+        restartScheduled = false;
+        startBaileys().catch((e) => console.error('[whatsapp-bridge] Baileys restart error:', e));
+    }, delay);
+}
+
+// Unwrap container messages (disappearing / view-once) to reach the real content.
+// Groups with disappearing messages enabled wrap every message in ephemeralMessage.
+function unwrapMessage(message) {
+    return message?.ephemeralMessage?.message
+        || message?.viewOnceMessage?.message
+        || message?.viewOnceMessageV2?.message
+        || message?.documentWithCaptionMessage?.message
+        || message;
+}
 
 async function startBaileys() {
     const baileys = await import('@whiskeysockets/baileys');
@@ -30,12 +95,22 @@ async function startBaileys() {
         fetchLatestBaileysVersion,
         makeCacheableSignalKeyStore,
         downloadMediaMessage,
+        areJidsSameUser,
     } = baileys;
     const makeInMemoryStore = baileys.makeInMemoryStore || null;
     const { Boom } = await import('@hapi/boom');
     const fs = await import('fs');
 
     fs.default.mkdirSync(AUTH_DIR, { recursive: true });
+
+    // Tear down any prior socket before opening a new one — a lingering socket
+    // with its listeners still attached would race this one over the same creds
+    // and trigger a WhatsApp conflict.
+    if (sock) {
+        try { sock.ev.removeAllListeners(); } catch (_) {}
+        try { sock.end(undefined); } catch (_) {}
+        sock = null;
+    }
 
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
@@ -56,29 +131,76 @@ async function startBaileys() {
         if (qr) {
             currentQR = qr;
             connectionStatus = 'qr_pending';
+            console.log('[whatsapp-bridge] QR generated — waiting for scan');
         }
 
         if (connection === 'open') {
             currentQR = null;
             connectionStatus = 'connected';
-            console.log('[whatsapp-bridge] Connected to WhatsApp');
+            reconnectAttempts = 0;
+            sawReplaced = false;
+            botId = sock.user?.id || '';
+            botLid = sock.user?.lid || '';
+            console.log('[whatsapp-bridge] Connected to WhatsApp (id=%s, lid=%s)', botId, botLid);
         }
 
         if (connection === 'close') {
             connectionStatus = 'disconnected';
+            if (isShuttingDown) { pushStatus(); return; }
+
             const statusCode = lastDisconnect?.error?.output?.statusCode;
-            const loggedOut = statusCode === DisconnectReason.loggedOut;
+            const reasonName = Object.keys(DisconnectReason)
+                .find((k) => DisconnectReason[k] === statusCode) || 'unknown';
+            console.log('[whatsapp-bridge] Connection closed (statusCode=%s reason=%s)',
+                statusCode, reasonName);
 
-            if (isShuttingDown) return;
-
-            if (loggedOut) {
-                console.log('[whatsapp-bridge] Logged out — clearing session');
+            const wipeAndRepair = (why) => {
+                console.log('[whatsapp-bridge] %s — clearing session and re-pairing', why);
                 fs.default.rmSync(AUTH_DIR, { recursive: true, force: true });
-            } else {
-                console.log('[whatsapp-bridge] Disconnected, reconnecting...');
-                setTimeout(startBaileys, 3000);
+                reconnectAttempts = 0;
+                scheduleRestart();
+            };
+
+            switch (statusCode) {
+                case DisconnectReason.loggedOut: // 401
+                    // A 401 immediately after a connectionReplaced is conflict
+                    // fallout, not a real logout — reconnect instead of wiping.
+                    if (sawReplaced) {
+                        console.log('[whatsapp-bridge] 401 after replace — treating as conflict, keeping creds');
+                        sawReplaced = false;
+                        scheduleRestart();
+                    } else {
+                        // Genuine logout (device removed from the phone): creds
+                        // are dead, so wipe and surface a fresh QR.
+                        wipeAndRepair('Logged out');
+                    }
+                    break;
+
+                case DisconnectReason.badSession: // 500 — auth files corrupt
+                    wipeAndRepair('Bad session');
+                    break;
+
+                case DisconnectReason.connectionReplaced: // 440
+                    // Another socket took over this session. Reconnecting would
+                    // restart the war and end in a false 401 wipe. Keep creds and
+                    // reconnect once after a long backoff instead of hammering.
+                    console.log('[whatsapp-bridge] Connection replaced — backing off, creds preserved');
+                    sawReplaced = true;
+                    reconnectAttempts = Math.max(reconnectAttempts, 3); // ~24s+ delay
+                    scheduleRestart();
+                    break;
+
+                default:
+                    // restartRequired (515), timedOut (408), connectionClosed (428),
+                    // unavailableService (503), network flaps — all transient.
+                    // Keep creds and reconnect with backoff.
+                    scheduleRestart();
             }
+            pushStatus();
+            return;
         }
+
+        pushStatus();
     });
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -89,22 +211,51 @@ async function startBaileys() {
             if (msg.key.fromMe) continue;
 
             const from = msg.key.remoteJid || '';
+            const isGroup = from.endsWith('@g.us');
 
-            // Use remoteJid as-is for replies (@lid JIDs are valid routable identifiers)
+            // In groups, remoteJid is the group; the actual sender is in participant
+            const participant = isGroup ? (msg.key.participant || '') : '';
             const jid = from;
-            const sender = from.includes('@') ? from.split('@')[0] : from;
+            const sender = isGroup
+                ? (participant.includes('@') ? participant.split('@')[0] : participant)
+                : (from.includes('@') ? from.split('@')[0] : from);
+            // Alternate identifier: when the chat is LID-addressed, WhatsApp
+            // exposes the phone-number JID in senderPn/participantPn. Shared
+            // channels match routes against both digit namespaces. Baileys v7
+            // frequently OMITS senderPn on the message key, which breaks
+            // routes keyed on the phone number — so when it's missing, resolve
+            // the phone JID from the signal LID map (getPNForLID does a USync
+            // if needed). Without this, a LID sender only carries its @lid
+            // digits and a phone-keyed route silently misses.
+            let altJid = (isGroup ? msg.key.participantPn : msg.key.senderPn) || '';
+            const lidSource = isGroup ? participant : from;
+            if (!altJid && lidSource.endsWith('@lid') && sock?.signalRepository?.lidMapping) {
+                try {
+                    altJid = (await sock.signalRepository.lidMapping.getPNForLID(lidSource)) || '';
+                } catch (e) {
+                    console.error('[whatsapp-bridge] getPNForLID failed for %s: %s', lidSource, e.message);
+                }
+            }
+            const altSender = altJid.includes('@') ? altJid.split('@')[0].split(':')[0] : altJid;
             const messageId = msg.key.id || '';
+            const content = unwrapMessage(msg.message);
+
+            // Remember display names of group members so quoted authors resolve
+            if (isGroup && msg.pushName && sender) {
+                if (pushNameCache.size > 2000) pushNameCache.clear();
+                pushNameCache.set(sender, msg.pushName);
+            }
 
             // Extract text
             const text =
-                msg.message?.conversation ||
-                msg.message?.extendedTextMessage?.text ||
-                msg.message?.imageMessage?.caption ||
-                msg.message?.videoMessage?.caption ||
+                content?.conversation ||
+                content?.extendedTextMessage?.text ||
+                content?.imageMessage?.caption ||
+                content?.videoMessage?.caption ||
                 '';
 
             // Extract button reply (approval flow)
-            const buttonReply = msg.message?.buttonsResponseMessage;
+            const buttonReply = content?.buttonsResponseMessage;
             if (buttonReply) {
                 const buttonId = buttonReply.selectedButtonId || '';
                 postCallback({ from: sender, jid, message_id: messageId, button_id: buttonId, text: '' });
@@ -113,10 +264,11 @@ async function startBaileys() {
 
             // Extract image if present
             let image = null;
-            if (msg.message?.imageMessage) {
+            if (content?.imageMessage) {
                 try {
+                    // downloadMediaMessage unwraps ephemeral/view-once internally
                     const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger });
-                    const mimetype = msg.message.imageMessage.mimetype || 'image/jpeg';
+                    const mimetype = content.imageMessage.mimetype || 'image/jpeg';
                     image = {
                         base64: buffer.toString('base64'),
                         mimetype,
@@ -126,17 +278,76 @@ async function startBaileys() {
                 }
             }
 
-            // Extract reply/quoted context
+            // Log every inbound message (early feature — verbose for monitoring)
+            console.log('[whatsapp-bridge] MSG id=%s from=%s jid=%s group=%s text_len=%d image=%s',
+                messageId, sender, jid, isGroup, text.length, !!image);
+            if (isGroup) {
+                console.log('[whatsapp-bridge] GROUP MSG keys:', JSON.stringify(Object.keys(msg.message || {})),
+                    'unwrapped:', JSON.stringify(Object.keys(content || {})));
+                console.log('[whatsapp-bridge] GROUP MSG from:', sender, 'text:', text?.substring(0, 100));
+            }
+
+            // Extract reply/quoted context (contextInfo lives on whichever message type is present)
+            const contextInfo = content?.extendedTextMessage?.contextInfo
+                || content?.imageMessage?.contextInfo
+                || content?.videoMessage?.contextInfo
+                || content?.audioMessage?.contextInfo;
             let quotedText = null;
-            const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+            let quotedIsBot = false;
+            let quotedSender = '';
+            let quotedSenderName = '';
+            const quoted = contextInfo?.quotedMessage;
             if (quoted) {
                 quotedText =
                     quoted.conversation ||
                     quoted.extendedTextMessage?.text ||
                     null;
+                const quotedParticipant = contextInfo.participant || '';
+                if (quotedParticipant) {
+                    quotedIsBot = (botId && areJidsSameUser(quotedParticipant, botId))
+                        || (botLid && areJidsSameUser(quotedParticipant, botLid));
+                    quotedSender = quotedParticipant.split('@')[0].split(':')[0];
+                    quotedSenderName = pushNameCache.get(quotedSender) || '';
+                } else {
+                    console.log('[whatsapp-bridge] WARNING: quoted message without participant:', JSON.stringify(contextInfo));
+                }
             }
 
-            postCallback({ from: sender, jid, message_id: messageId, text, image, quoted_text: quotedText });
+            // Check if bot is @mentioned
+            const mentionedJids = contextInfo?.mentionedJid || [];
+            let botMentioned = mentionedJids.some(
+                m => (botId && areJidsSameUser(m, botId))
+                    || (botLid && areJidsSameUser(m, botLid))
+            );
+            // Fallback: check text for @bot_number if contextInfo didn't have mentions.
+            // In LID-addressed groups the mention text carries the LID digits, not the phone.
+            if (!botMentioned && isGroup && text) {
+                const botPhone = botId ? botId.split(':')[0].split('@')[0] : '';
+                const botLidDigits = botLid ? botLid.split(':')[0].split('@')[0] : '';
+                if ((botPhone && text.includes('@' + botPhone)) ||
+                    (botLidDigits && text.includes('@' + botLidDigits))) {
+                    botMentioned = true;
+                }
+            }
+            if (isGroup) {
+                console.log('[whatsapp-bridge] mentionedJids:', JSON.stringify(mentionedJids), 'botMentioned:', botMentioned, 'quotedIsBot:', quotedIsBot, 'botId:', botId, 'botLid:', botLid);
+            }
+
+            const groupName = isGroup ? await getGroupSubject(jid) : null;
+
+            postCallback({
+                from: sender, jid, message_id: messageId, text, image,
+                alt_sender: altSender,
+                alt_jid: altJid,
+                quoted_text: quotedText,
+                is_group: isGroup,
+                bot_mentioned: botMentioned,
+                quoted_is_bot: quotedIsBot,
+                quoted_sender: quotedSender,
+                quoted_sender_name: quotedSenderName,
+                group_name: groupName,
+                pushName: msg.pushName || '',
+            });
         }
     });
 }
@@ -221,14 +432,14 @@ app.post('/send-buttons', async (req, res) => {
 });
 
 app.post('/typing', async (req, res) => {
-    const { to } = req.body || {};
+    const { to, state } = req.body || {};
     if (!to) return res.status(400).json({ error: 'to required' });
     if (!sock || connectionStatus !== 'connected') {
         return res.status(503).json({ error: 'Not connected to WhatsApp' });
     }
     const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`;
     try {
-        await sock.sendPresenceUpdate('composing', jid);
+        await sock.sendPresenceUpdate(state === 'paused' ? 'paused' : 'composing', jid);
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });

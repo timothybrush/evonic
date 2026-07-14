@@ -113,11 +113,26 @@ def execute(agent: dict, args: dict) -> dict:
         return {'error': str(e)}
 
     parent_name = parent_agent.get('name', parent_id)
-    report_to_id, report_to_channel_id = resolve_report_to_for_subagent_spawn(
+    report_to_id, report_to_channel_id, _ = resolve_report_to_for_subagent_spawn(
         parent_id,
         agent.get('user_id', ''),
         agent.get('channel_id', '') or '',
     )
+
+    sync = bool(skill_cfg.get('sync', False))
+
+    metadata = {
+        'agent_message': True,
+        'from_agent_id': parent_id,
+        'from_agent_name': parent_name,
+        'agent_message_depth': 1,
+        'subagent_spawn': True,
+        'injected_system_vars': injected_vars,
+        'report_to_id': report_to_id,
+        'report_to_channel_id': report_to_channel_id,
+    }
+    if sync:
+        metadata['skip_auto_forward'] = True
 
     result = notify_agent(
         agent_id=explorer_id,
@@ -127,16 +142,7 @@ def execute(agent: dict, args: dict) -> dict:
         channel_id=None,
         dedup=False,
         trigger_llm=True,
-        metadata={
-            'agent_message': True,
-            'from_agent_id': parent_id,
-            'from_agent_name': parent_name,
-            'agent_message_depth': 1,
-            'subagent_spawn': True,
-            'injected_system_vars': injected_vars,
-            'report_to_id': report_to_id,
-            'report_to_channel_id': report_to_channel_id,
-        },
+        metadata=metadata,
     )
 
     session_id = result.get('session_id')
@@ -147,7 +153,6 @@ def execute(agent: dict, args: dict) -> dict:
     )
 
     # --- Sync mode: block until the explorer finishes and return findings directly ---
-    sync = bool(skill_cfg.get('sync', False))
     if sync:
         if not result.get('success'):
             return {
@@ -167,6 +172,7 @@ def execute(agent: dict, args: dict) -> dict:
         answer_data = {}
 
         from backend.event_stream import event_stream
+        from backend.agent_runtime.concurrency import paused_model_gate
 
         def _on_explorer_done(data):
             if data.get('agent_id') == explorer_id:
@@ -178,7 +184,11 @@ def execute(agent: dict, args: dict) -> dict:
         event_stream.on('final_answer', _on_explorer_done)
 
         try:
-            if not done.wait(timeout=timeout):
+            # Release our turn's model-gate while blocked so the explorer (which needs
+            # the same gate) can run — otherwise parent↔explorer deadlock until timeout.
+            with paused_model_gate():
+                finished = done.wait(timeout=timeout)
+            if not finished:
                 return {
                     'explorer_id': explorer_id,
                     'path': path,
