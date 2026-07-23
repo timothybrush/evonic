@@ -1252,7 +1252,31 @@ class AgentRuntime:
             'image_url': image_url,
             'audio_url': audio_url,
             'video_url': video_url,
+            'metadata': meta,
         })
+
+        # A plain human reply in the exact originating session resumes the
+        # delegated agent that requested it. Save and emit it above for complete
+        # history, then stop the originating agent from processing it as a new turn.
+        is_human_message = not external_user_id.startswith(
+            ('__agent__', '__system__', '__scheduler__'))
+        if is_human_message and not meta.get('escalation_reply'):
+            from backend.escalation_routing import route_pending_escalation_reply
+            escalation_result = route_pending_escalation_reply(
+                agent_id, session_id, message,
+            )
+            if escalation_result is not None:
+                routed = bool(escalation_result.get('success'))
+                return {
+                    "response": (
+                        "Your response was sent to the requesting agent."
+                        if routed else
+                        "Your response could not be sent to the requesting agent."
+                    ),
+                    "tool_trace": [],
+                    "timeline": [],
+                    "escalation_routed": routed,
+                }
 
         # Busy-ack: if the agent-level concurrency gate is saturated, send an
         # immediate acknowledgment so the user knows their message was received.
@@ -1413,14 +1437,17 @@ class AgentRuntime:
         """Build messages from DB, call LLM, trigger summarization, return response.
         Uses per-agent/per-model concurrency gate then per-session lock."""
         agent_id = agent['id']
-        # Sub-agents don't exist in the agents DB — use parent's ID for model lookup
         db_agent_id = agent.get('_db_agent_id', agent_id)
         AgentRuntime._touch_session(ctx.session_id)
         try:
-            model = db.get_agent_model(db_agent_id)
+            if agent.get('is_explorer'):
+                from backend.agent_runtime import explorer as _explorer
+                model = _explorer.primary_model(agent) or db.get_agent_model(db_agent_id)
+            else:
+                model = db.get_agent_model(db_agent_id)
             model_id = model.get('id') if model else None
         except Exception as e:
-            _logger.warning("Failed to get default model for agent %s, proceeding without model gating: %s", agent_id, e)
+            _logger.warning("Failed to resolve turn model for agent %s, proceeding without model gating: %s", agent_id, e)
             model_id = None
         with self._llm_serializer._concurrency_mgr.turn_gate(agent_id, model_id):
             session_lock = self._get_session_lock(ctx.session_id)
@@ -1799,6 +1826,7 @@ class AgentRuntime:
             if _jsonl_entries is None:
                 _jsonl_entries = chatlog.get_entries_for_llm_trail(
                     after_ts=summary_record.get('last_message_ts') if summary_record else None,
+                    **_ctx.trail_history_kwargs(agent_id),
                 )
             # NOTE: The second condition handles an edge case where _jsonl_entries is empty
             # but the chatlog still has entries for this session. This happens when ALL
@@ -1930,34 +1958,42 @@ class AgentRuntime:
             else:
                 assigned_tool_ids = db.get_agent_tools(db_agent_id)
 
-            # Super agent gets all skill tool IDs automatically — authorization guard
-            # must allow execution of all skill tools without per-skill assignment.
-            if agent.get('is_super'):
+            # Inject skill tool IDs from assigned skills into assigned_tool_ids.
+            # This mirrors context.py build_tools() Layer 9 auto-injection and
+            # ensures the authorization guard allows execution of skill tools
+            # that belong to skills explicitly assigned to the agent.
+            # Skill tool IDs are namespaced: skill:<skill_id>:<fn_name>
+            assigned_skill_ids = set(db.get_agent_skills(db_agent_id))
+            if assigned_skill_ids:
                 from backend.skills_manager import skills_manager
-                _all_skill_ids = set()
+                _existing = set(assigned_tool_ids)
                 for _sd in skills_manager.get_all_skill_tool_defs():
                     _tid = _sd.get('id', '')
-                    if _tid:
-                        _all_skill_ids.add(_tid)
-                _existing = set(assigned_tool_ids)
-                for _tid in _all_skill_ids:
-                    if _tid not in _existing:
+                    if not _tid:
+                        continue
+                    # Parse skill:<skill_id>:<fn_name>
+                    _parts = _tid.split(':', 2)
+                    if len(_parts) != 3 or _parts[0] != 'skill':
+                        continue
+                    _skill_id = _parts[1]
+                    if _skill_id in assigned_skill_ids and _tid not in _existing:
                         assigned_tool_ids.append(_tid)
 
-            # Auto-assign save_artifact to all agents so they can save files.
-            # No DB assignment needed — every agent can create and store artifacts.
-            if 'save_artifact' not in assigned_tool_ids:
-                assigned_tool_ids.append('save_artifact')
+            # Auto-assign artifact tools (save_artifact, list_artifacts, fetch_artifact)
+            # only when artifacts_enabled is True for the agent.
+            if agent.get('artifacts_enabled', True):
+                if 'save_artifact' not in assigned_tool_ids:
+                    assigned_tool_ids.append('save_artifact')
 
-            # Agents with save_artifact automatically get list_artifacts.
-            # fetch_artifact is only auto-assigned for agents with workplace or sandbox;
-            # local agents can access artifacts directly via bash/runpy.
-            if 'save_artifact' in assigned_tool_ids:
-                if 'list_artifacts' not in assigned_tool_ids:
-                    assigned_tool_ids.append('list_artifacts')
-                if agent.get('workplace_id') or agent.get('sandbox_enabled', 0):
-                    if 'fetch_artifact' not in assigned_tool_ids:
-                        assigned_tool_ids.append('fetch_artifact')
+                # Agents with save_artifact automatically get list_artifacts.
+                # fetch_artifact is only auto-assigned for agents with workplace or sandbox;
+                # local agents can access artifacts directly via bash/runpy.
+                if 'save_artifact' in assigned_tool_ids:
+                    if 'list_artifacts' not in assigned_tool_ids:
+                        assigned_tool_ids.append('list_artifacts')
+                    if agent.get('workplace_id') or agent.get('sandbox_enabled', 0):
+                        if 'fetch_artifact' not in assigned_tool_ids:
+                            assigned_tool_ids.append('fetch_artifact')
 
             # Auto-assign send_file to all agents so they can send files via channels.
             # No DB assignment needed — every agent can send file attachments.
@@ -2010,7 +2046,10 @@ class AgentRuntime:
                 'workplace_id': _workplace_id,
                 'is_super': bool(agent.get('is_super')),
                 'is_subagent': bool(agent.get('is_subagent')),
+                'is_explorer': bool(agent.get('is_explorer')),
                 'parent_id': agent.get('parent_id'),
+                '_sandbox_parent_session_id': agent.get('_sandbox_parent_session_id'),
+                '_sandbox_parent_workspace': agent.get('_sandbox_parent_workspace'),
                 'agent_messaging_enabled': bool(agent.get('agent_messaging_enabled')),
                 'sandbox_enabled': agent.get('sandbox_enabled', 1),
                 'safety_checker_enabled': agent.get('safety_checker_enabled', 1),
@@ -2038,6 +2077,9 @@ class AgentRuntime:
                         agent_context['from_agent_id'] = _meta['from_agent_id']
                     if _meta.get('injected_system_vars') is not None:
                         agent_context['injected_system_vars'] = _meta['injected_system_vars']
+                    for _key in ('report_to_id', 'report_to_channel_id', 'session_id', 'reply_to_id'):
+                        if _meta.get(_key) is not None:
+                            agent_context[f'origin_{_key}'] = _meta[_key]
             else:
                 # Fall back to SQLite for pre-migration sessions
                 _recent = db.get_session_messages(ctx.session_id, limit=5, agent_id=db_agent_id)
@@ -2051,6 +2093,9 @@ class AgentRuntime:
                                 agent_context['from_agent_id'] = _meta['from_agent_id']
                             if _meta.get('injected_system_vars') is not None:
                                 agent_context['injected_system_vars'] = _meta['injected_system_vars']
+                            for _key in ('report_to_id', 'report_to_channel_id', 'session_id', 'reply_to_id'):
+                                if _meta.get(_key) is not None:
+                                    agent_context[f'origin_{_key}'] = _meta[_key]
                         break
 
         # Agent state: restore or create, then check for user approval
@@ -2072,9 +2117,9 @@ class AgentRuntime:
                             _user_text = _c
                         break
                 if classify_task(_user_text) == "trivial":
-                    ms = AgentState(mode="execute", auto_trivial=True)
+                    ms = AgentState(mode="execute", auto_trivial=True, always_execute=bool(agent.get('always_execute')))
                 else:
-                    ms = AgentState()
+                    ms = AgentState(always_execute=bool(agent.get('always_execute')))
             # Hybrid approval: only check if state was restored (agent already presented a plan).
             # Skip for new sessions so the first user message never auto-approves a non-existent plan.
             if not is_new_session and ms.mode == 'plan':
@@ -2094,7 +2139,7 @@ class AgentRuntime:
                         # System-triggered task (e.g. from a plugin): reset to fresh plan mode
                         # so the agent can start a new plan cycle for this task
                         # instead of being stuck in a stale plan from a previous task.
-                        ms = AgentState()
+                        ms = AgentState(always_execute=bool(agent.get('always_execute')))
             # Cross-task boundary handling. CMP (when enabled) owns it: the
             # detector routes the turn (continue/return/branch) and a branch
             # IS the ATG re-arm — a fresh plan cycle on its own path. Agents

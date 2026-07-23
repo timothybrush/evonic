@@ -393,6 +393,12 @@ class SchemaMixin:
                 except sqlite3.OperationalError:
                     pass
 
+            # Migration: add always_execute to decouple CMP from plan/execute mode.
+            try:
+                cursor.execute("ALTER TABLE agents ADD COLUMN always_execute BOOLEAN DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+
             # Migration: add artifacts_enabled (default ON for all agents)
             try:
                 cursor.execute("ALTER TABLE agents ADD COLUMN artifacts_enabled BOOLEAN DEFAULT 1")
@@ -1158,6 +1164,30 @@ class SchemaMixin:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_index_agent ON session_index(agent_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_index_updated ON session_index(updated_at)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_index_external ON session_index(external_user_id)")
+
+            # Durable correlation for delegated-agent questions sent to a human.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_escalations (
+                    id TEXT PRIMARY KEY,
+                    requesting_agent_id TEXT NOT NULL,
+                    requesting_session_id TEXT NOT NULL,
+                    originating_agent_id TEXT NOT NULL,
+                    originating_session_id TEXT NOT NULL,
+                    delivery_session_id TEXT NOT NULL,
+                    external_user_id TEXT NOT NULL,
+                    channel_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    metadata TEXT DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    answered_at REAL
+                )
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_user_escalations_pending "
+                "ON user_escalations(originating_session_id, status, created_at)"
+            )
 
             # ==================== System Alerts Table ====================
             cursor.execute("""

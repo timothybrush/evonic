@@ -546,6 +546,26 @@ def _cache_key_valid(agent: Dict[str, Any], cache_entry: Dict[str, Any]) -> bool
     return True
 
 
+def trail_history_kwargs(agent_id: str) -> dict:
+    """Extra kwargs for chatlog.get_entries_for_llm_trail().
+
+    Normally empty, so trail history keeps its default 50-message sliding
+    window. For agent ids listed in the `trail_history_full_agents` setting,
+    raise the message limit to `trail_history_limit` (default 1_000_000), i.e.
+    TRUE full history — the whole transcript is sent every turn until the model
+    hits its context ceiling. Used by the CMP endurance benchmark to run a
+    genuine full-history baseline against the bounded windowed/CMP arms.
+    """
+    try:
+        from models.db import db
+        full = (db.get_setting('trail_history_full_agents', '') or '')
+        if agent_id and agent_id in {a.strip() for a in full.split(',') if a.strip()}:
+            return {'limit': int(db.get_setting('trail_history_limit', '1000000') or 1000000)}
+    except Exception:
+        pass
+    return {}
+
+
 def build_system_prompt(agent: Dict[str, Any], injected_system_vars: Dict[str, str] = None) -> str:
     """Build the system prompt including tool injections and KB file listing.
 
@@ -733,6 +753,7 @@ def build_system_prompt(agent: Dict[str, Any], injected_system_vars: Dict[str, s
         ("/detach", "Move the running long-running process (build/download) to the background so we can keep chatting — tracking is persistent (survives restarts) and you'll be notified to report the result when it finishes; the watcher is removed automatically, no cleanup needed"),
         ("/jobs", "List background jobs for this session"),
         ("/dump", "Dump current session as JSONL file for download"),
+        ("/model", "Show or switch LLM model"),
     ]
     slash_commands.append(("/plan", "Switch to plan mode"))
     slash_commands.append(("/unfocus", "Force-clear focus mode — use when agent is stuck in focus after a failed task"))
@@ -823,6 +844,7 @@ def build_tools(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
         'workplace_id': agent.get('workplace_id'),
         'enable_atg': bool(agent.get('enable_atg')) and bool(agent.get('enable_agent_state')),
         'enable_cmp': bool(agent.get('enable_cmp')) and bool(agent.get('enable_agent_state')),
+        'always_execute': bool(agent.get('always_execute')),
     }
     if agent.get('builtin_tools_enabled', True):
         tools.extend(tool_registry.get_builtin_tools(agent_context))
@@ -838,6 +860,8 @@ def build_tools(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
             continue
         if fn_name not in BUILTIN_TOOL_IDS:
             continue
+        if fn_name == 'save_artifact' and not agent.get('artifacts_enabled', True):
+            continue
         if fn_name in seen_fn_names:
             continue
         seen_fn_names.add(fn_name)
@@ -850,22 +874,6 @@ def build_tools(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
     if agent.get('is_super'):
         from backend.tools.super_agent_tools import get_super_agent_tool_defs
         tools.extend(get_super_agent_tool_defs())
-
-    # Super agent gets ALL skill tools automatically — no per-skill assignment needed
-    if agent.get('is_super'):
-        seen_fn_names = {t['function']['name'] for t in tools if t.get('function', {}).get('name')}
-        for tool_def in tool_registry.get_all_tool_defs():
-            tool_id = tool_def.get('id', '')
-            fn_name = tool_def.get('function', {}).get('name', '')
-            if not tool_id.startswith('skill:') or not fn_name:
-                continue
-            if fn_name in seen_fn_names:
-                continue
-            seen_fn_names.add(fn_name)
-            tools.append({
-                "type": "function",
-                "function": tool_def['function']
-            })
 
     # Agent messaging tools — available to super agent and agents with messaging enabled
     if agent.get('is_super') or agent.get('agent_messaging_enabled') != 0:
@@ -921,31 +929,30 @@ def build_tools(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
     # This ensures that when an agent has a skill assigned in agent_skills and that skill
     # is eagerly loaded (no lazy_tools=true), the tools are available without manual
     # tool assignment in agent_tools.
-    if not agent.get('is_super'):
-        assigned_skill_ids = set(db.get_agent_skills(eid))
-        if assigned_skill_ids:
-            for skill in skills_manager.list_skills():
-                skill_id = skill.get('id', '')
-                if skill_id not in assigned_skill_ids:
+    assigned_skill_ids = set(db.get_agent_skills(eid))
+    if assigned_skill_ids:
+        for skill in skills_manager.list_skills():
+            skill_id = skill.get('id', '')
+            if skill_id not in assigned_skill_ids:
+                continue
+            # Skip lazy-loaded skills — their tools are injected via use_skill
+            if skill.get('lazy_tools', False):
+                continue
+            # Skip super_only skills for non-super agents
+            if skill.get('super_only', False) and not agent.get('is_super'):
+                continue
+            defs = skills_manager.get_skill_tool_defs(skill_id)
+            for tool_def in defs:
+                fn_name = tool_def.get('function', {}).get('name', '')
+                if not fn_name:
                     continue
-                # Skip lazy-loaded skills — their tools are injected via use_skill
-                if skill.get('lazy_tools', False):
+                # Avoid duplicates
+                if any(t['function']['name'] == fn_name for t in tools):
                     continue
-                # Skip super_only skills for non-super agents
-                if skill.get('super_only', False):
-                    continue
-                defs = skills_manager.get_skill_tool_defs(skill_id)
-                for tool_def in defs:
-                    fn_name = tool_def.get('function', {}).get('name', '')
-                    if not fn_name:
-                        continue
-                    # Avoid duplicates
-                    if any(t['function']['name'] == fn_name for t in tools):
-                        continue
-                    tools.append({
-                        "type": "function",
-                        "function": tool_def['function']
-                    })
+                tools.append({
+                    "type": "function",
+                    "function": tool_def['function']
+                })
 
     # ── Patch /workspace and Docker/container references for non-sandbox agents ──
     # Tool JSON definitions contain /workspace paths and Docker/container

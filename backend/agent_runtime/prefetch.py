@@ -100,20 +100,41 @@ class TurnPrefetcher:
             else:
                 assigned_tool_ids = db.get_agent_tools(db_agent_id)
 
-            # Auto-assign save_artifact to all agents so they can save files.
-            # No DB assignment needed — every agent can create and store artifacts.
-            if 'save_artifact' not in assigned_tool_ids:
-                assigned_tool_ids.append('save_artifact')
+            # Inject skill tool IDs from assigned skills into assigned_tool_ids.
+            # This mirrors build_tools() Layer 9 auto-injection and ensures
+            # the authorization guard allows execution of skill tools that
+            # belong to skills explicitly assigned to the agent.
+            assigned_skill_ids = set(db.get_agent_skills(db_agent_id))
+            if assigned_skill_ids:
+                from backend.skills_manager import skills_manager
+                _existing_ids = set(assigned_tool_ids)
+                for _sd in skills_manager.get_all_skill_tool_defs():
+                    _tid = _sd.get('id', '')
+                    if not _tid:
+                        continue
+                    # Parse skill:<skill_id>:<fn_name>
+                    _parts = _tid.split(':', 2)
+                    if len(_parts) != 3 or _parts[0] != 'skill':
+                        continue
+                    _skill_id = _parts[1]
+                    if _skill_id in assigned_skill_ids and _tid not in _existing_ids:
+                        assigned_tool_ids.append(_tid)
 
-            # Agents with save_artifact automatically get list_artifacts.
-            # fetch_artifact is only auto-assigned for agents with workplace or sandbox;
-            # local agents can access artifacts directly via bash/runpy.
-            if 'save_artifact' in assigned_tool_ids:
-                if 'list_artifacts' not in assigned_tool_ids:
-                    assigned_tool_ids.append('list_artifacts')
-                if agent.get('workplace_id') or agent.get('sandbox_enabled', 0):
-                    if 'fetch_artifact' not in assigned_tool_ids:
-                        assigned_tool_ids.append('fetch_artifact')
+            # Auto-assign artifact tools (save_artifact, list_artifacts, fetch_artifact)
+            # only when artifacts_enabled is True for the agent.
+            if agent.get('artifacts_enabled', True):
+                if 'save_artifact' not in assigned_tool_ids:
+                    assigned_tool_ids.append('save_artifact')
+
+                # Agents with save_artifact automatically get list_artifacts.
+                # fetch_artifact is only auto-assigned for agents with workplace or sandbox;
+                # local agents can access artifacts directly via bash/runpy.
+                if 'save_artifact' in assigned_tool_ids:
+                    if 'list_artifacts' not in assigned_tool_ids:
+                        assigned_tool_ids.append('list_artifacts')
+                    if agent.get('workplace_id') or agent.get('sandbox_enabled', 0):
+                        if 'fetch_artifact' not in assigned_tool_ids:
+                            assigned_tool_ids.append('fetch_artifact')
 
             # Agents with vision_enabled automatically get describe_image.
             # No DB assignment needed — every vision-capable agent can analyze images.
@@ -139,9 +160,13 @@ class TurnPrefetcher:
                 'session_id': session_id,
                 'assigned_tool_ids': assigned_tool_ids,
                 'workspace': agent.get('workspace') or None,
+                'workplace_id': agent.get('workplace_id') or None,
                 'is_super': bool(agent.get('is_super')),
                 'is_subagent': bool(agent.get('is_subagent')),
+                'is_explorer': bool(agent.get('is_explorer')),
                 'parent_id': agent.get('parent_id'),
+                '_sandbox_parent_session_id': agent.get('_sandbox_parent_session_id'),
+                '_sandbox_parent_workspace': agent.get('_sandbox_parent_workspace'),
                 'agent_messaging_enabled': bool(agent.get('agent_messaging_enabled')),
                 'sandbox_enabled': agent.get('sandbox_enabled', 1),
                 'safety_checker_enabled': agent.get('safety_checker_enabled', 1),
@@ -189,8 +214,10 @@ class TurnPrefetcher:
                     _logger.exception("CMP prefetch history filter failed — full history")
                     _jsonl_entries = None
             if _jsonl_entries is None:
+                from backend.agent_runtime import context as _ctx
                 _jsonl_entries = chatlog.get_entries_for_llm_trail(
                     after_ts=summary_record.get('last_message_ts') if summary_record else None,
+                    **_ctx.trail_history_kwargs(agent_id),
                 )
             _use_jsonl = bool(_jsonl_entries) or chatlog.get_last_entry() is not None
 

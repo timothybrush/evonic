@@ -342,8 +342,8 @@ html.dark .agent-tab.active {
         <button class="agent-tab tab-btn" onclick="showTab('general')" data-tab="general"><i data-lucide="sliders-horizontal"></i><span>Settings</span></button>
         <button class="agent-tab tab-btn" onclick="showTab('knowledge')" data-tab="knowledge"><i data-lucide="book-open"></i><span>Knowledge</span></button>
         <button class="agent-tab tab-btn" onclick="showTab('tools')" data-tab="tools"><i data-lucide="wrench"></i><span>Tools</span></button>
-        {# Always rendered (hidden for super) so softSwitchAgent can toggle without a full reload #}
-        <button class="agent-tab tab-btn{{ ' hidden' if agent.is_super else '' }}" onclick="showTab('skills')" data-tab="skills"><i data-lucide="sparkles"></i><span>Skills</span></button>
+        {# Always rendered so softSwitchAgent can toggle without a full reload #}
+        <button class="agent-tab tab-btn" onclick="showTab('skills')" data-tab="skills"><i data-lucide="sparkles"></i><span>Skills</span></button>
         <button class="agent-tab tab-btn" onclick="showTab('channels')" data-tab="channels"><i data-lucide="radio"></i><span>Channels</span></button>
         <button class="agent-tab tab-btn" onclick="showTab('portals')" data-tab="portals"><i data-lucide="folder-symlink"></i><span>Portals</span></button>
         {% if agent.artifacts_enabled %}
@@ -574,6 +574,16 @@ html.dark .agent-tab.active {
                             </div>
                         </label>
                     </div>
+                    <div>
+                        <label class="flex items-center gap-3 cursor-pointer select-none">
+                            {{ toggle_widget(id='agent-always-execute', checked=agent.always_execute) }}
+                            <div>
+                                <span class="text-gray-600 dark:text-gray-300 text-sm font-medium">Always Execute</span>
+                                <p class="text-xs text-gray-400 mt-0.5">Force agent to stay in execute mode — bypasses plan/execute blocking. Write tools are always available while CMP and ATG remain active. Requires Agent State.</p>
+                            </div>
+                        </label>
+                    </div>
+
                     <div>
                         <label class="flex items-center gap-3 cursor-pointer select-none">
                             {{ toggle_widget(id='agent-parallel-exec', checked=(agent.disable_parallel_tool_execution if agent.disable_parallel_tool_execution is not none else False)) }}
@@ -1643,7 +1653,7 @@ html.dark .agent-tab.active {
 </div>
 
 <script src="{{ url_for('static', filename='js/chat-ui.js') }}?v=59" defer></script>
-<script src="{{ url_for('static', filename='js/agent-state.js') }}?v=5" defer></script>
+<script src="{{ url_for('static', filename='js/agent-state.js') }}?v=6" defer></script>
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
 function showToast(message, type = 'success') {
@@ -2262,6 +2272,7 @@ const AgentAutoSave = {
         { id: 'agent-state-enabled', key: 'enable_agent_state', type: 'bool' },
         { id: 'agent-atg-enabled', key: 'enable_atg', type: 'bool' },
         { id: 'agent-cmp-enabled', key: 'enable_cmp', type: 'bool' },
+        { id: 'agent-always-execute', key: 'always_execute', type: 'bool' },
         { id: 'agent-parallel-exec', key: 'disable_parallel_tool_execution', type: 'bool' },
         { id: 'agent-prefetch', key: 'disable_turn_prefetch', type: 'bool' },
         { id: 'agent-messaging-enabled', key: 'agent_messaging_enabled', type: 'bool' },
@@ -4745,6 +4756,11 @@ async function loadChatHistory() {
     restoreActiveReasoning(); // fire-and-forget — history already rendered
 }
 
+document.addEventListener('evonic:message-received', function (event) {
+    const meta = (event.detail && event.detail.metadata) || {};
+    if (meta.escalated_from_agent_session) loadChatHistory();
+});
+
 async function restoreActiveReasoning() {
     const epoch = window._agentEpoch;
     try {
@@ -4752,14 +4768,13 @@ async function restoreActiveReasoning() {
         const sessionId = await _getChatSessionId();
         if (!sessionId || _chatBusy || _currentTurn) return; // bail if user already sent a message or turn exists
 
-        // Fetch all buffered events for this session
+        // Fetch all buffered events for this session.
         const eRes = await fetch(`/api/agents/${encodeURIComponent(AGENT_ID)}/chat/events?session_id=${encodeURIComponent(sessionId)}&after=0`);
         if (!eRes.ok || _chatBusy || _currentTurn) return; // bail if user sent a message while fetching
         const eData = await eRes.json();
-        if (epoch !== window._agentEpoch) return; // agent switched mid-fetch — discard
+        if (epoch !== window._agentEpoch || sessionId !== _chatSessionId) return; // agent/session switched mid-fetch
         if (_chatBusy || _currentTurn) return; // bail before touching shared state
         const events = eData.events || [];
-        if (!events.length) return;
 
         // Only replay events from the current in-progress turn.
         // Discard everything up to and including the last 'done' OR 'turn_split' so
@@ -4770,7 +4785,15 @@ async function restoreActiveReasoning() {
         const lastClearIdx = events.reduce((idx, ev, i) => ev.event === 'session_clear' ? i : idx, -1);
         const cutIdx = Math.max(lastDoneIdx, lastSplitIdx, lastClearIdx);
         const replayEvents = cutIdx >= 0 ? events.slice(cutIdx + 1) : events;
-        if (!replayEvents.length) return;
+
+        // The event buffer can retain an incomplete tail after a restart or other
+        // interrupted turn. Treat /busy as authoritative for every restoration,
+        // including when replayEvents is non-empty, and only resume this session.
+        const busyRes = await fetch(`/api/agents/${encodeURIComponent(AGENT_ID)}/busy`);
+        if (!busyRes.ok || _chatBusy || _currentTurn) return;
+        const busyState = await busyRes.json();
+        if (epoch !== window._agentEpoch || sessionId !== _chatSessionId) return;
+        if (_chatBusy || _currentTurn || !busyState.busy || busyState.session_id !== sessionId) return;
 
         // Guard: if the in-progress turn started before the last turn_end rendered
         // from chatlog history, that turn was already fully finalized — skip to avoid
@@ -5159,6 +5182,7 @@ document.addEventListener('keydown', function (e) {
 
 // ==================== File Upload Helpers ====================
 
+const CHAT_ATTACHMENTS_ENABLED = {{ 'true' if agent.attachments_enabled else 'false' }};
 const _chatPendingFiles = [];
 
 function _insertChatImageReference(slot) {
@@ -5259,7 +5283,16 @@ function openChatAttachmentPreview(index) {
 }
 
 function addChatFileAttachments(files, { insertImageReferences = true } = {}) {
-    const accepted = Array.from(files || []).filter(_isFileAccepted);
+    const candidates = Array.from(files || []);
+    if (!candidates.length) return;
+    if (!CHAT_ATTACHMENTS_ENABLED) {
+        showToast(
+            'This agent does not support file attachments. Enable attachments in Agent Settings to upload files.',
+            'error'
+        );
+        return;
+    }
+    const accepted = candidates.filter(_isFileAccepted);
     if (!accepted.length) return;
     for (const file of accepted) {
         _chatPendingFiles.push({ file, url: URL.createObjectURL(file) });
@@ -7389,7 +7422,7 @@ window.softSwitchAgent = async function (newId, opts = {}) {
     if (nameEl) nameEl.textContent = data.name || newId;
     // Toggle super-only structural elements (always present in the DOM now)
     const isSuper = !!data.is_super;
-    ['#agent-header-id-badge', '#gear-dropdown-wrap', '[data-tab="skills"]'].forEach(function (sel) {
+    ['#agent-header-id-badge', '#gear-dropdown-wrap'].forEach(function (sel) {
         const el = document.querySelector(sel);
         if (el) el.classList.toggle('hidden', isSuper); // shown for regular, hidden for super
     });
