@@ -160,7 +160,10 @@ class DiscordChannel(BaseChannel):
         return (
             "You are responding via Discord. Discord supports Markdown, so you may "
             "use **bold**, *italic*, `inline code`, and ```code blocks```. Keep each "
-            "message under 2000 characters; very long answers are split automatically."
+            "message under 2000 characters; very long answers are split automatically.\n"
+            "- Images and files: ALWAYS deliver them with the `send_file` tool so they arrive "
+            "as attachments. NEVER embed images with HTML `<img>` tags or Markdown image "
+            "embeds (`![alt](url)`) - Discord does not render them in chat; they arrive as raw text."
         )
 
     # ------------------------------------------------------------------ lifecycle
@@ -667,10 +670,15 @@ class DiscordChannel(BaseChannel):
             desc = info.get('description', 'This action requires careful consideration.')
             reasons_str = ', '.join(reasons) if reasons else '-'
             tool_args = data.get('tool_args') or {}
-            code_snippet = tool_args.get('script') or tool_args.get('code') or ''
             code_lang = 'bash' if 'script' in tool_args else 'python'
-            if code_snippet and len(code_snippet) > 500:
-                code_snippet = code_snippet[:500] + '\n... (truncated)'
+            # Prefer the focused snippet (window centered on the dangerous line with a
+            # marker) so the risky code is always visible even when the full script is
+            # long. Fall back to head-truncation only when no focus snippet is present.
+            code_snippet = info.get('focus_snippet') or ''
+            if not code_snippet:
+                code_snippet = tool_args.get('script') or tool_args.get('code') or ''
+                if code_snippet and len(code_snippet) > 500:
+                    code_snippet = code_snippet[:500] + '\n... (truncated)'
             code_block = f"\n```{code_lang}\n{code_snippet}\n```" if code_snippet else ''
             source_agent = data.get('source_agent_name')
             header = (f"⚠️ Approval Required (agent: {source_agent})"

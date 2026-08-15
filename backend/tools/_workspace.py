@@ -185,16 +185,17 @@ def resolve_workspace_path(agent, file_path: str, fallback_workspace: str) -> st
     """Resolve a file path to an absolute path, honoring the agent's workspace.
 
     Rules (in priority order):
-    1. If path starts with '/workspace', strip that prefix and join with the
-       agent's workspace (or fallback_workspace).  This is the runpy-sandbox
-       convention for paths inside a Docker container.
-    2. If path is relative (not absolute) and the agent has a workspace set,
+    1. Preserve an absolute path that is already inside the agent's workspace.
+    2. If path is '/workspace' or starts with '/workspace/', strip that virtual
+       prefix and join with the agent's workspace (or fallback_workspace). This
+       is the runpy-sandbox convention for paths inside a Docker container.
+    3. If path is relative (not absolute) and the agent has a workspace set,
        resolve it relative to that workspace.
-    3. If the agent has a workspace set, validate that the resolved path stays
-       within the workspace boundary using realpath prefix-check.  Absolute
-       paths outside the workspace are blocked by returning a non-existent
-       path that the caller will report as "file not found".
-    4. Otherwise return the path unchanged.
+    4. If the agent has a workspace set, validate that the resolved path stays
+       within the workspace boundary using realpath prefix-check. Absolute paths
+       outside the workspace are blocked by returning a non-existent path that
+       the caller will report as "file not found".
+    5. Otherwise return the path unchanged.
     """
     if not file_path:
         return file_path
@@ -204,10 +205,37 @@ def resolve_workspace_path(agent, file_path: str, fallback_workspace: str) -> st
     # be treated as relative and joined with the workspace base (wrong).
     file_path = os.path.expanduser(file_path)
 
-    if file_path.startswith('/workspace'):
-        workspace_root = (agent or {}).get('workspace') or fallback_workspace
+    # Artifacts registry: /workspace/shared/agents/<id>/artifacts ALWAYS maps to
+    # the HOST registry BASE_DIR/shared/agents/<id>/artifacts that the web UI,
+    # list_artifacts, fetch_artifact and save_artifact serve — independent of
+    # the agent's workspace.  Without this, an agent whose workspace differs
+    # from BASE_DIR (e.g. workspace=agents/<id>/) would resolve the artifacts
+    # path to a workspace-relative COPY that the UI never reads (silent
+    # artifact divergence).  Sandbox backends translate this host registry path
+    # to the container bind path in resolve_path(); local agents use it as-is.
+    if file_path.startswith('/workspace/shared/agents/'):
+        eff_id = effective_agent_id(agent)
+        tail = file_path[len('/workspace/shared/agents/'):]
+        if tail == eff_id or tail.startswith(eff_id + '/'):
+            sub = tail[len(eff_id):].lstrip('/')
+            if sub == 'artifacts' or sub.startswith('artifacts/'):
+                return os.path.join(_SHARED_AGENTS_DIR, eff_id, sub)
+
+    workspace = (agent or {}).get('workspace')
+    if workspace and os.path.isabs(file_path):
+        try:
+            workspace_real = os.path.realpath(workspace)
+            path_real = os.path.realpath(file_path)
+            if path_real == workspace_real or path_real.startswith(workspace_real + os.sep):
+                return file_path
+        except (OSError, PermissionError):
+            pass
+
+    if file_path == '/workspace' or file_path.startswith('/workspace/'):
+        workspace_root = workspace or fallback_workspace
         rel = file_path[len('/workspace'):].lstrip('/')
-        resolved = os.path.join(os.path.abspath(workspace_root), rel)
+        workspace_root_abs = os.path.abspath(workspace_root)
+        resolved = os.path.join(workspace_root_abs, rel) if rel else workspace_root_abs
         # Boundary check
         workspace = (agent or {}).get('workspace')
         if workspace:

@@ -44,12 +44,20 @@ import json
 import re
 from config import AGENT_MAX_TOOL_RESULT_CHARS as MAX_TOOL_RESULT_CHARS
 from config import STALE_SESSION_INJECTION_ENABLED, STALE_SESSION_THRESHOLD_SECONDS
-from config import LONG_GAP_WEEKS
+from config import LONG_GAP_WEEKS, BACKGROUND_JOBS_INJECTION_ENABLED
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _LOGS_DIR = os.path.join(_BASE_DIR, 'logs')
 
 _logger = logging.getLogger(__name__)
+
+# Image-embed detection for external channels (web renders these fine; chat
+# clients like WhatsApp/Telegram/Discord do not). Used by the final-message
+# safety net in AgentRuntime._strip_media_embeds().
+_IMG_EMBED_RE = re.compile(r'<img\b[^>]*\bsrc=["\']([^"\']+)["\'][^>]*>', re.IGNORECASE)
+_MD_IMG_EMBED_RE = re.compile(r'!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)')
+_ARTIFACT_URL_RE = re.compile(r'^/api/agents/([^/]+)/artifacts/(.+)$')
+_ATTACHMENT_URL_RE = re.compile(r'^/api/attachments/(\d+)(?:/view)?$')
 
 
 def _append_attachment_context(content: str, attachment_infos, attachment_info,
@@ -839,7 +847,12 @@ class AgentRuntime:
                         task.ctx.external_user_id, task.ctx.session_id)
                     if instance and instance.is_running:
                         try:
-                            instance.send_message(task.ctx.external_user_id, result['response'])
+                            _out_text = result['response']
+                            # External channels do not render HTML <img>/Markdown image
+                            # embeds: deliver resolvable media via send_file and strip
+                            # the embed markup from the outgoing text.
+                            _out_text = self._strip_media_embeds(_out_text, task.ctx.session_id)
+                            instance.send_message(task.ctx.external_user_id, _out_text)
                             # Check for async send errors (channel records failures internally)
                             if isinstance(instance, BaseChannel) and instance.has_send_error(task.ctx.external_user_id):
                                 send_err = instance.get_send_error(task.ctx.external_user_id)
@@ -1008,6 +1021,14 @@ class AgentRuntime:
         # Kill any running tool subprocess for this session
         from backend.tools.lib.process_tracker import process_tracker
         process_tracker.kill(session_id)
+
+    def is_stop_requested(self, session_id: str) -> bool:
+        """True if /stop was signalled for this session and not yet consumed.
+
+        Public read-only view of the stop flag, for blocking tools (e.g. the
+        sync Explore wait) that must abort promptly instead of holding the
+        agent loop until their own timeout expires."""
+        return self._get_stop_event(session_id).is_set()
 
     def summarize_session(self, agent: dict, session_id: str) -> bool:
         """Trigger summarization for a session. Public API for slash commands.
@@ -2065,6 +2086,12 @@ class AgentRuntime:
             else:
                 _workspace = agent.get('workspace') or None
 
+            # A LID-addressed WhatsApp DM reaches us as bare LID digits, which
+            # look exactly like a phone number. Resolve the real identity once
+            # here so tools never have to guess from user_id.
+            from backend.channels.whatsapp_identity import resolve_identity
+            _identity = resolve_identity(ctx.channel_id, ctx.external_user_id)
+
             agent_context = {
                 'id': agent_id,
                 '_db_agent_id': agent.get('_db_agent_id', agent_id),
@@ -2072,11 +2099,15 @@ class AgentRuntime:
                 'agent_name': agent.get('name', ''),
                 'agent_model': None,
                 'user_id': ctx.external_user_id,
+                'user_phone': _identity['user_phone'],
+                'user_jid': _identity['user_jid'],
+                'user_id_namespace': _identity['user_id_namespace'],
                 'channel_id': ctx.channel_id,
                 'session_id': ctx.session_id,
                 'assigned_tool_ids': assigned_tool_ids,
                 'workspace': _workspace,
                 'workplace_id': _workplace_id,
+                'send_file_allowed_path_regex': agent.get('send_file_allowed_path_regex', ''),
                 'is_super': bool(agent.get('is_super')),
                 'is_subagent': bool(agent.get('is_subagent')),
                 'is_explorer': bool(agent.get('is_explorer')),
@@ -2112,16 +2143,28 @@ class AgentRuntime:
             if _trusted_meta.get('channel_message_id'):
                 agent_context['trusted_message_id'] = str(_trusted_meta['channel_message_id'])
             if _trusted_meta.get('attachment_info'):
-                _att_ids = []
                 _a_info = _trusted_meta['attachment_info']
-                if isinstance(_a_info, list):
-                    for _att in _a_info:
-                        if isinstance(_att, dict) and _att.get('id'):
-                            _att_ids.append(str(_att['id']))
-                elif isinstance(_a_info, dict) and _a_info.get('id'):
-                    _att_ids.append(str(_a_info['id']))
+                _att_infos = _a_info if isinstance(_a_info, list) else [_a_info]
+                _att_ids = []
+                _att_mime_types = []
+                _att_paths = []
+                for _att in _att_infos:
+                    if not isinstance(_att, dict):
+                        continue
+                    _att_id = _att.get('id') or _att.get('attachment_id')
+                    if _att_id is not None:
+                        _att_ids.append(str(_att_id))
+                    if _att.get('mime_type'):
+                        _att_mime_types.append(str(_att['mime_type']))
+                    _att_path = _att.get('workplace_path') or _att.get('file_path')
+                    if _att_path:
+                        _att_paths.append(str(_att_path))
                 if _att_ids:
                     agent_context['trusted_attachment_ids'] = _att_ids
+                if _att_mime_types:
+                    agent_context['trusted_attachment_mime_types'] = _att_mime_types
+                if _att_paths:
+                    agent_context['trusted_attachment_paths'] = _att_paths
 
         # Propagate agent_message_depth and from_agent_id from incoming message metadata
         if ctx.external_user_id.startswith("__agent__"):
@@ -2302,6 +2345,24 @@ class AgentRuntime:
             )
             if not _already_subagent_directive:
                 messages.insert(1, {"role": "system", "content": SUBAGENT_EXECUTE_DIRECTIVE})
+
+        # --- Background jobs injection ---
+        # The agent sees a background process once, in the bash result that
+        # spawned it; nothing surfaces it again. Re-state what is still running
+        # so it does not leave processes to go stale. Appended at the END: the
+        # list changes every turn, and inserting it up front would invalidate the
+        # prompt prefix cache for the whole history. Must run after
+        # _apply_wrapper_prefix, which identifies the current user message by
+        # position (last in the list).
+        if BACKGROUND_JOBS_INJECTION_ENABLED:
+            try:
+                from backend.agent_runtime.background_jobs import build_context_block
+                _bg_ctx = build_context_block(
+                    ctx.session_id, agent.get('agent_id') or agent.get('id') or '')
+                if _bg_ctx:
+                    messages.append({"role": "system", "content": _bg_ctx})
+            except Exception:
+                _logger.exception("[bgjob] context injection failed — continuing")
 
         # Call LLM with tool loop
         _inner_turn_start = time.time()
@@ -2573,6 +2634,10 @@ class AgentRuntime:
         chatlog_manager.get(agent_id, session_id).append({'type': 'final', 'session_id': session_id,
                                                           'content': reply,
                                                           'metadata': {'busy_rejection': True}})
+        # Record the deferral so the pending user message is auto-resumed once the
+        # agent is free and unfocused (drained in _send_free_notification). Queued
+        # on the opt-in branch too — the real answer supersedes the notification.
+        self._queue_deferred_resume(agent_id, session_id, external_user_id, channel_id)
         # Send via channel if applicable
         if channel_id:
             try:
@@ -2614,6 +2679,22 @@ class AgentRuntime:
         with cls._free_notify_lock:
             cls._free_notify_pending[agent_id] = {
                 'session_id': session_id,
+                'external_user_id': external_user_id,
+                'channel_id': channel_id,
+            }
+
+    # Sessions rejected while the agent was focus-busy, awaiting auto-resume:
+    # agent_id -> {session_id: {'external_user_id': str, 'channel_id': str|None}}
+    # Drained by _send_free_notification once the agent is free and unfocused.
+    _deferred_resume_pending: dict = {}
+    _deferred_resume_lock = threading.Lock()
+
+    @classmethod
+    def _queue_deferred_resume(cls, agent_id: str, session_id: str,
+                                external_user_id: str, channel_id: Optional[str]) -> None:
+        """Record a busy-rejected session so it is re-run when the agent frees up."""
+        with cls._deferred_resume_lock:
+            cls._deferred_resume_pending.setdefault(agent_id, {})[session_id] = {
                 'external_user_id': external_user_id,
                 'channel_id': channel_id,
             }
@@ -2741,6 +2822,67 @@ class AgentRuntime:
                             metadata={'attachment_info': attachment_info})
 
         return True
+
+    def _resolve_media_url(self, url: str) -> Optional[str]:
+        """Resolve an internal media URL to a local file path, or None.
+
+        Supports artifact URLs (/api/agents/<aid>/artifacts/<filename>) and
+        attachment URLs (/api/attachments/<id>/view). Only returns paths that
+        exist on disk and stay inside the artifact directory (no traversal).
+        """
+        if not url:
+            return None
+        url = url.split('?')[0].split('#')[0]
+
+        m = _ARTIFACT_URL_RE.match(url)
+        if m:
+            aid, filename = m.group(1), m.group(2)
+            if '..' in filename or '/' in filename:
+                return None
+            safe_root = os.path.realpath(
+                os.path.join(_BASE_DIR, 'shared', 'agents', aid, 'artifacts'))
+            candidate = os.path.realpath(os.path.join(safe_root, filename))
+            if candidate.startswith(safe_root + os.sep) and os.path.isfile(candidate):
+                return candidate
+            return None
+
+        m = _ATTACHMENT_URL_RE.match(url)
+        if m:
+            try:
+                row = db.get_attachment(int(m.group(1)))
+            except Exception:
+                return None
+            if row and row.get('file_path') and os.path.isfile(row['file_path']):
+                return row['file_path']
+        return None
+
+    def _strip_media_embeds(self, text: str, session_id: str) -> str:
+        """Safety net for external channels: convert HTML/Markdown image embeds
+        in a final reply into real file attachments.
+
+        Resolvable artifact/attachment URLs are delivered via send_file_as_bot()
+        and the embed markup is removed from the outgoing text so the chat client
+        shows a clean message plus the attachment. Unresolvable embeds are also
+        stripped (they would otherwise arrive as raw text).
+        """
+        if not text:
+            return text
+
+        def _handle(url: str) -> str:
+            path = self._resolve_media_url(url)
+            if path:
+                try:
+                    self.send_file_as_bot(session_id, path)
+                except Exception as e:
+                    _logger.warning("send_file_as_bot failed for embed %s: %s", url, e)
+            else:
+                _logger.info(
+                    "Stripped unresolvable media embed from outgoing channel text: %s", url)
+            return ''
+
+        text = _IMG_EMBED_RE.sub(lambda m: _handle(m.group(1)), text)
+        text = _MD_IMG_EMBED_RE.sub(lambda m: _handle(m.group(1)), text)
+        return text
 
     def send_as_user(self, session_id: str, text: str,
                      image_url: str | None = None,
@@ -2875,14 +3017,17 @@ class AgentRuntime:
         return True
 
     def resume_session(self, agent: dict, session_id: str,
-                       external_user_id: str, channel_id: str | None = None) -> None:
+                       external_user_id: str, channel_id: str | None = None,
+                       send_via_channel: bool = False) -> None:
         """Re-enqueue a session for agent processing without saving a new message.
 
         Used at startup to follow up on unreplied user messages that were left
-        pending after a server restart.
+        pending after a server restart, and by the deferred-resume drain to
+        answer messages rejected while the agent was focus-busy (pass
+        send_via_channel=True there so channel users receive the answer).
         """
         if not agent.get('enabled', True):
             return
         task = _QueueTask(agent, SessionContext(session_id, external_user_id, channel_id),
-                          send_via_channel=False)
+                          send_via_channel=send_via_channel)
         self._message_queue.put(task)

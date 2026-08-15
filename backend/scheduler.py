@@ -122,6 +122,17 @@ class Scheduler:
             )
         except Exception as e:  # pragma: no cover - defensive guard
             log.warning("Failed to register attachments cleanup job: %s", e)
+        # Built-in: remove expired unassigned shared-channel senders hourly.
+        try:
+            self._scheduler.add_job(
+                self._cleanup_expired_shared_inbox,
+                IntervalTrigger(hours=1, timezone=self._timezone),
+                id='builtin:shared_inbox_cleanup',
+                replace_existing=True,
+                misfire_grace_time=3600,
+            )
+        except Exception as e:  # pragma: no cover - defensive guard
+            log.warning("Failed to register shared inbox cleanup job: %s", e)
         # Built-in: SEFTON nightly agentic tidy for all sefton-mode agents.
         try:
             self._scheduler.add_job(
@@ -152,13 +163,26 @@ class Scheduler:
         except Exception as e:
             log.error("Attachments cleanup failed: %s", e, exc_info=True)
 
-    def _sefton_tidy_all(self):
-        """Nightly SEFTON tidy: run KB Janitor for sefton-mode agents active in last 24h."""
+    def _cleanup_expired_shared_inbox(self):
+        """Hourly housekeeping for globally expired unassigned senders."""
         try:
-            from datetime import datetime, timedelta, timezone
+            from routes.settings import _shared_inbox_retention_hours
+            from models.db import db
+            deleted = db.cleanup_expired_inbox_entries(
+                _shared_inbox_retention_hours())
+            if deleted:
+                log.info("Shared inbox cleanup: deleted %d expired sender(s)", deleted)
+        except Exception as e:
+            log.error("Shared inbox cleanup failed: %s", e, exc_info=True)
+
+    def _sefton_tidy_all(self):
+        """Nightly SEFTON tidy: run KB Janitor for sefton-mode agents whose
+        last KB filing was within the last 24h."""
+        try:
             from models.db import db
             from backend.agent_runtime.memory_manager import (
                 resolve_kb_organizer_mode, sefton_tidy_agent,
+                _load_sefton_last_filing,
             )
             agents = db.get_agents()
             sefton_agents = [a for a in agents
@@ -166,28 +190,23 @@ class Scheduler:
             if not sefton_agents:
                 return
 
-            cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+            cutoff = time.time() - 24 * 3600
             log.info("SEFTON tidy: %d sefton agent(s), cutoff %s",
-                     len(sefton_agents), cutoff.isoformat())
+                     len(sefton_agents),
+                     datetime.fromtimestamp(cutoff, timezone.utc).isoformat())
 
             for agent in sefton_agents:
                 if not agent.get('enabled'):
                     log.info("SEFTON tidy [%s]: skipped (agent disabled)", agent['id'])
                     continue
-                last_active = agent.get('last_active_at')
-                if not last_active:
-                    log.info("SEFTON tidy [%s]: skipped (never active)", agent['id'])
+                last_filing = _load_sefton_last_filing(agent['id'])
+                if last_filing <= 0:
+                    log.info("SEFTON tidy [%s]: skipped (never filed)", agent['id'])
                     continue
-                if isinstance(last_active, str):
-                    last_active_dt = datetime.fromisoformat(
-                        last_active.replace('Z', '+00:00'))
-                else:
-                    last_active_dt = last_active
-                if last_active_dt.tzinfo is None:
-                    last_active_dt = last_active_dt.replace(tzinfo=timezone.utc)
-                if last_active_dt < cutoff:
-                    log.info("SEFTON tidy [%s]: skipped (last active %s)",
-                             agent['id'], last_active_dt.isoformat())
+                if last_filing < cutoff:
+                    log.info("SEFTON tidy [%s]: skipped (last filing %s)",
+                             agent['id'],
+                             datetime.fromtimestamp(last_filing, timezone.utc).isoformat())
                     continue
                 try:
                     result = sefton_tidy_agent(agent['id'])
@@ -573,15 +592,20 @@ class Scheduler:
                 action_summary = f"{method} {url} -> {status_code}"
                 if resp_body:
                     action_output = resp_body
-            elif action_type == 'poll_background_job':
-                from backend.agent_runtime.background_jobs import run_poll_action
-                result = run_poll_action(action_config)
-                action_summary = (f"poll '{action_config.get('command', '?')}': "
+            elif action_type == 'poll_monitor':
+                from backend.agent_runtime.monitors import run_monitor_poll
+                result = run_monitor_poll(action_config)
+                action_summary = (f"monitor '{action_config.get('command', '?')}': "
                                   f"{result.get('state', '?')}")
                 if result.get('done'):
-                    # Job finished (or timed out) — agent already notified.
-                    # Self-delete so the interval stops running.
+                    # Monitor resolved (fired, ended, or expired) and the agent
+                    # was notified. Self-delete so the interval stops running.
                     _cancel_after = schedule_id
+            elif action_type == 'poll_background_job':
+                # Legacy auto-watch rows left in SQLite from before background
+                # processes became opt-in. Drain them silently on first tick.
+                action_summary = 'legacy background-job poll: removed'
+                _cancel_after = schedule_id
             else:
                 log.warning("Unknown action_type '%s' for %s",
                             action_type, schedule_id)
@@ -679,13 +703,13 @@ class Scheduler:
             'action_type': action_type, 'fired_at': fired_at,
         })
 
-        # Self-cleanup for finished background-job polls — runs last so the
+        # Self-cleanup for resolved monitors — runs last so the
         # row updates above don't touch an already-deleted schedule.
         if _cancel_after:
             try:
                 self.cancel_schedule(_cancel_after)
             except Exception as e:
-                log.warning("poll_background_job %s: self-cancel failed: %s",
+                log.warning("monitor %s: self-cancel failed: %s",
                             _cancel_after, e)
 
     def _action_emit_event(self, config: dict):

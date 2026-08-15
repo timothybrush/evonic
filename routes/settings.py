@@ -1285,6 +1285,44 @@ def api_user_audit(user_id):
 # inbound senders are routed per-user/group via config.routes and unknown
 # senders land in shared_channel_inbox for capture-and-assign.
 
+_SHARED_INBOX_RETENTION_KEY = 'shared_channel_inbox_retention_hours'
+_SHARED_INBOX_RETENTION_DEFAULT_HOURS = 24
+_SHARED_INBOX_RETENTION_MIN_HOURS = 1
+_SHARED_INBOX_RETENTION_MAX_HOURS = 24 * 365
+
+
+def _shared_inbox_retention_hours() -> int:
+    """Return the configured inbox retention, falling back safely to 24 hours."""
+    try:
+        value = int(db.get_setting(
+            _SHARED_INBOX_RETENTION_KEY,
+            str(_SHARED_INBOX_RETENTION_DEFAULT_HOURS),
+        ))
+        return max(_SHARED_INBOX_RETENTION_MIN_HOURS,
+                   min(_SHARED_INBOX_RETENTION_MAX_HOURS, value))
+    except (TypeError, ValueError):
+        return _SHARED_INBOX_RETENTION_DEFAULT_HOURS
+
+
+_SHARED_ACCESS_MODES = {'assigned_only', 'unrestricted'}
+
+
+def _validate_shared_access_config(channel, data):
+    """Return validated access settings, or an API error response tuple."""
+    config = dict(channel.get('config') or {})
+    mode = data.get('access_mode', config.get('access_mode', 'assigned_only'))
+    default_agent_id = data.get(
+        'default_agent_id', config.get('default_agent_id') or '')
+    if mode not in _SHARED_ACCESS_MODES:
+        return None, (jsonify({
+            'error': 'access_mode must be assigned_only or unrestricted'}), 400)
+    if mode == 'unrestricted':
+        agent = db.get_agent(default_agent_id)
+        if not agent or not agent.get('enabled'):
+            return None, (jsonify({
+                'error': 'default_agent_id must identify an enabled agent'}), 400)
+    return {'access_mode': mode, 'default_agent_id': default_agent_id}, None
+
 def _shared_channel_or_404(channel_id):
     channel = db.get_channel(channel_id)
     if not channel or channel.get('agent_id') is not None:
@@ -1292,9 +1330,38 @@ def _shared_channel_or_404(channel_id):
     return channel
 
 
+@settings_bp.route('/api/shared-channels/settings', methods=['GET'])
+def api_get_shared_channel_settings():
+    """Return global settings that apply to every shared channel."""
+    return jsonify({
+        'unassigned_sender_retention_hours': _shared_inbox_retention_hours(),
+    })
+
+
+@settings_bp.route('/api/shared-channels/settings', methods=['PUT'])
+def api_update_shared_channel_settings():
+    """Persist validated global unassigned-sender retention."""
+    data = request.get_json() or {}
+    if 'unassigned_sender_retention_hours' not in data:
+        return jsonify({'error': 'unassigned_sender_retention_hours is required'}), 400
+    try:
+        hours = int(data['unassigned_sender_retention_hours'])
+    except (TypeError, ValueError):
+        return jsonify({'error': 'unassigned_sender_retention_hours must be an integer'}), 400
+    if not _SHARED_INBOX_RETENTION_MIN_HOURS <= hours <= _SHARED_INBOX_RETENTION_MAX_HOURS:
+        return jsonify({'error': 'unassigned_sender_retention_hours must be between 1 and 8760'}), 400
+    old_value = db.get_setting(
+        _SHARED_INBOX_RETENTION_KEY, str(_SHARED_INBOX_RETENTION_DEFAULT_HOURS))
+    db.set_setting(_SHARED_INBOX_RETENTION_KEY, str(hours))
+    _audit_setting_change(_SHARED_INBOX_RETENTION_KEY, old_value, hours)
+    db.cleanup_expired_inbox_entries(hours)
+    return jsonify({'success': True, 'unassigned_sender_retention_hours': hours})
+
+
 @settings_bp.route('/api/shared-channels', methods=['GET'])
 def api_list_shared_channels():
     from backend.channels.registry import channel_manager
+    db.cleanup_expired_inbox_entries(_shared_inbox_retention_hours())
     channels = db.get_shared_channels()
     for ch in channels:
         ch['running'] = channel_manager.is_running(ch['id'])
@@ -1322,7 +1389,8 @@ def api_create_shared_channel():
         'agent_id': None,
         'type': 'whatsapp_shared',
         'name': name,
-        'config': {'mode': 'open', 'routes': {}},
+        'config': {'mode': 'open', 'access_mode': 'assigned_only',
+                   'default_agent_id': '', 'routes': {}},
     })
     try:
         channel_manager.start_channel(chan_id)
@@ -1338,10 +1406,20 @@ def api_create_shared_channel():
 @settings_bp.route('/api/shared-channels/<channel_id>', methods=['PUT'])
 def api_update_shared_channel(channel_id):
     from backend.channels.registry import channel_manager
-    if not _shared_channel_or_404(channel_id):
+    channel = _shared_channel_or_404(channel_id)
+    if not channel:
         return jsonify({'error': 'Shared channel not found'}), 404
     data = request.get_json() or {}
-    db.update_channel(channel_id, {k: v for k, v in data.items() if k in ('name', 'enabled')})
+    access, error = _validate_shared_access_config(channel, data)
+    if error:
+        return error
+    updates = {k: v for k, v in data.items() if k in ('name', 'enabled')}
+    if 'access_mode' in data or 'default_agent_id' in data:
+        config = dict(channel.get('config') or {})
+        config.update(access)
+        updates['config'] = config
+    if updates:
+        db.update_channel(channel_id, updates)
     if 'enabled' in data:
         try:
             if data['enabled']:
@@ -1454,6 +1532,7 @@ def api_delete_shared_route(channel_id, user_id):
 def api_shared_channel_inbox(channel_id):
     if not _shared_channel_or_404(channel_id):
         return jsonify({'error': 'Shared channel not found'}), 404
+    db.cleanup_expired_inbox_entries(_shared_inbox_retention_hours())
     return jsonify({'inbox': db.get_inbox(channel_id)})
 
 

@@ -471,6 +471,13 @@ def api_delete_agent(agent_id):
     agent_dir = os.path.join(AGENTS_DIR, agent_id)
     if os.path.isdir(agent_dir):
         shutil.rmtree(agent_dir)
+    # Drop the cached chat DB so a recreated agent with the same id gets a
+    # fresh connection instead of a stale handle on the deleted chat.db inode.
+    try:
+        from models.chat import agent_chat_manager
+        agent_chat_manager.drop(agent_id)
+    except Exception:
+        pass
     audit.log_agent_crud(user_id='admin', agent_id=agent_id, action='delete', ip=_audit_ip())
     return jsonify({'success': True})
 
@@ -2025,8 +2032,23 @@ def api_chat_agent_state(agent_id):
     if session_id:
         background_processes = []
         try:
-            from backend.agent_runtime.background_jobs import background_jobs
-            for j in background_jobs.list_for_session(session_id):
+            from backend.agent_runtime.background_jobs import (
+                background_jobs, refresh_statuses_async)
+            jobs = background_jobs.list_for_session(session_id)
+            # Nothing else notices an unmonitored process exiting, so a finished
+            # job would keep a live row here forever. Probe in the background
+            # (throttled) and let the next poll pick up the result.
+            if any(j.status == 'running' for j in jobs):
+                refresh_statuses_async(
+                    session_id,
+                    {**(db.get_agent(agent_id) or {}), 'agent_id': agent_id})
+            # Only hit the schedules table when there is something to annotate —
+            # this endpoint is polled by the browser.
+            watched = set()
+            if jobs:
+                from backend.agent_runtime import monitors
+                watched = monitors.monitored_job_ids(agent_id, session_id)
+            for j in jobs:
                 background_processes.append({
                     'job_id': j.job_id,
                     'command': j.command,
@@ -2037,6 +2059,7 @@ def api_chat_agent_state(agent_id):
                     'finished_at': j.finished_at,
                     'log_file': j.log_file,
                     'session_id': j.session_id,
+                    'monitored': j.job_id in watched,
                 })
         except Exception:
             pass

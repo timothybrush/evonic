@@ -336,6 +336,10 @@ def _build_static_prompt(agent: Dict[str, Any]) -> str:
         "the `recall` tool to look up past facts — nothing is injected automatically."
     )
     parts.append(
+        "- `recall(query=\"<key>\", mode=\"key\")` — exact current value of a keyed "
+        "fact. Fastest and most precise; prefer it whenever the key is listed below."
+    )
+    parts.append(
         "- `recall(query=\"...\")` — fast keyword lookup of a specific stored fact "
         "(e.g. a phone number, an address, a name). This is the default (mode='fts')."
     )
@@ -364,6 +368,20 @@ def _build_static_prompt(agent: Dict[str, Any]) -> str:
         "memory. Only after confirming the information is not in memory should you "
         "resort to filesystem exploration."
     )
+
+    # Keys-only memory index: show WHAT the agent knows (a few tokens per key)
+    # without paying for the contents. Enables precise recall(mode='key') and
+    # keeps remember() key naming consistent (the agent reuses listed keys).
+    try:
+        _mem_keys = db.get_active_dimensions(aid, limit=50)
+    except Exception:
+        _mem_keys = []
+    if _mem_keys:
+        parts.append(
+            "Known memory keys (current value via `recall(query=\"<key>\", "
+            "mode=\"key\")`; reuse a listed key in remember() to update that fact):"
+        )
+        parts.append("`" + "`, `".join(_mem_keys) + "`")
 
     # List available skills with SYSTEM.md so the agent knows what it can load
     skills_mgr = skills_manager
@@ -756,8 +774,8 @@ def build_system_prompt(agent: Dict[str, Any], injected_system_vars: Dict[str, s
         ("/help", "Show available commands"),
         ("/summary", "Force regenerate session summary"),
         ("/stop", "Stop the agent's current processing loop"),
-        ("/detach", "Move the running long-running process (build/download) to the background so we can keep chatting — tracking is persistent (survives restarts) and you'll be notified to report the result when it finishes; the watcher is removed automatically, no cleanup needed"),
-        ("/jobs", "List background jobs for this session"),
+        ("/detach", "Stop waiting on the running long-running process and attach an on-exit monitor to it, so we can keep chatting and you report back once it finishes (persistent, survives restarts; the monitor removes itself)"),
+        ("/jobs", "List background jobs for this session and any monitors attached to them"),
         ("/dump", "Dump current session as JSONL file for download"),
         ("/model", "Show or switch LLM model"),
     ]
@@ -814,30 +832,26 @@ def build_system_prompt(agent: Dict[str, Any], injected_system_vars: Dict[str, s
         if agent.get('sandbox_enabled'):
             artifacts_path = os.path.join('/workspace/shared/agents', aid, 'artifacts')
             artifacts_note = (
-                f"Your artifacts directory is: `{artifacts_path}`\n"
-                "Files you save here will appear in the Artifacts tab on your agent detail page.\n"
-                "Use `save_artifact(source_path=\"...\")` for files already on disk (binaries, images, PDFs) "
-                "or `save_artifact(content=\"...\")` for text generated in your response.\n"
-                "You can also access it via `/_self/artifacts/` with any file tool.\n\n"
-                f"**Artifact public URL**: `/api/agents/{aid}/artifacts/<filename>`\n"
-                "This URL serves the file directly in the browser (no download prompt for images).\n"
-                "To display an image inline in chat, save it via `save_artifact(source_path=\"...\")` "
-                f"then embed in your markdown response: `<img src=\"/api/agents/{aid}/artifacts/filename.webp\" alt=\"...\">`\n\n"
-                "**Important**: `/_self/` paths only work with file tools (`read_file`, `write_file`, `patch`, `str_replace`) "
-                "— NOT with `bash` or `runpy`. When saving from bash/runpy, use the full workspace path "
-                f"`{artifacts_path}` or the `save_artifact` tool."
+                f"Directory: `{artifacts_path}` (also `/_self/artifacts/` via file tools only). "
+                "Save with `save_artifact(content=\"...\")` or `save_artifact(source_path=\"...\")`; "
+                "files appear in the Artifacts tab. "
+                f"Public URL: `/api/agents/{aid}/artifacts/<filename>`. "
+                f"Embed images with `<img src=\"/api/agents/{aid}/artifacts/filename.webp\" alt=\"...\">`. "
+                "Deliver files to the user with `send_file` (or `save_artifact` for the Artifacts tab). "
+                "Never give local filesystem paths (e.g. `/home/...`, `sandbox:...`) as chat links — "
+                "the user cannot open them. "
+                f"`bash`/`runpy` must use `{artifacts_path}`, not `/_self/`."
             )
         else:
             artifacts_note = (
-                f"Your artifacts are served at: `/api/agents/{aid}/artifacts/<filename>`\n"
-                "Use the `save_artifact` tool to save files. "
-                "Use `save_artifact(source_path=\"...\")` for files already on disk (binaries, images) "
-                "or `save_artifact(content=\"...\")` for text generated in your response. "
-                "You can also access the directory via `/_self/artifacts/` with file tools.\n\n"
-                "To display an image inline in chat: save it via `save_artifact(source_path=\"...\")` "
-                f"then embed in your markdown response: `<img src=\"/api/agents/{aid}/artifacts/filename.webp\" alt=\"...\">`\n\n"
-                "**Important**: `/_self/` paths only work with file tools (`read_file`, `write_file`, `patch`, `str_replace`) "
-                "— NOT with `bash` or `runpy`."
+                f"Public URL: `/api/agents/{aid}/artifacts/<filename>`. "
+                "Save with `save_artifact(content=\"...\")` or `save_artifact(source_path=\"...\")`; "
+                "files are also available at `/_self/artifacts/` via file tools. "
+                f"Embed images with `<img src=\"/api/agents/{aid}/artifacts/filename.webp\" alt=\"...\">`. "
+                "Deliver files to the user with `send_file` (or `save_artifact` for the Artifacts tab). "
+                "Never give local filesystem paths (e.g. `/home/...`, `sandbox:...`) as chat links — "
+                "the user cannot open them. "
+                "`bash`/`runpy` cannot use `/_self/`."
             )
         prompt += "\n\n## Artifacts Directory\n" + artifacts_note
 
@@ -862,7 +876,7 @@ def build_tools(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
             if fn_name and fn_name not in seen_fn_names:
                 seen_fn_names.add(fn_name)
                 tools.append(tool_def)
-        return tools
+        return compact_tool_definitions(tools)
 
     # Resolve explicit assignments before adding messaging definitions so the LLM
     # sees only messaging tools the agent can actually execute. Sub-agents inherit
@@ -876,6 +890,7 @@ def build_tools(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
         'id': agent['id'],
         'is_super': bool(agent.get('is_super')),
         'workplace_id': agent.get('workplace_id'),
+        'send_file_allowed_path_regex': agent.get('send_file_allowed_path_regex', ''),
         'enable_atg': bool(agent.get('enable_atg')) and bool(agent.get('enable_agent_state')),
         'enable_cmp': bool(agent.get('enable_cmp')) and bool(agent.get('enable_agent_state')),
         'always_execute': bool(agent.get('always_execute')),
@@ -940,6 +955,11 @@ def build_tools(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
     # Auto-assign transcribe_audio for audio-enabled agents.
     if agent.get('audio_enabled'):
         assigned_ids.add('transcribe_audio')
+
+    # Auto-assign monitor wherever bash is available — it is the opt-in way to
+    # be notified about background processes, which only bash can start.
+    if 'bash' in assigned_ids:
+        assigned_ids.add('monitor')
 
     if assigned_ids:
         seen_fn_names = {t['function']['name'] for t in tools if t.get('function', {}).get('name')}
@@ -1021,17 +1041,31 @@ def build_tools(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
                         desc = desc.replace(old, new)
                     param_def['description'] = desc
 
-    # Strip empty description strings from all tool definitions.
-    # OpenAI function calling spec treats description as optional;
-    # removing empty strings saves tokens without losing information.
-    for tool in tools:
-        func = tool.get('function', {})
-        if isinstance(func.get('description'), str) and func['description'] == '':
-            del func['description']
-        for param_def in func.get('parameters', {}).get('properties', {}).values():
-            if isinstance(param_def, dict) and isinstance(param_def.get('description'), str) and param_def['description'] == '':
-                del param_def['description']
+    compact_tool_definitions(tools)
+    return tools
 
+
+def compact_tool_definitions(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Remove schema fields that carry no constraint or model-facing information.
+
+    The input is updated in place to preserve ``build_tools`` compatibility. Only
+    empty descriptions and empty ``required`` arrays are removed; names, types,
+    properties, enums, non-empty constraints, and tool availability are unchanged.
+    """
+    def _compact(value: Any) -> None:
+        if isinstance(value, dict):
+            if value.get('description') == '':
+                del value['description']
+            if value.get('required') == []:
+                del value['required']
+            for nested in value.values():
+                _compact(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                _compact(nested)
+
+    for tool in tools:
+        _compact(tool)
     return tools
 
 

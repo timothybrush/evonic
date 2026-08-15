@@ -54,6 +54,46 @@ def _format_llm_error(error_type: str, context: Optional[Dict[str, Any]] = None)
     return user_msg
 
 
+def _parse_sse_error_frame(raw_text: str) -> Optional[Dict[str, str]]:
+    """Extract the error type/message from an SSE ``event: error`` frame.
+
+    Some OpenAI-compatible gateways (e.g. cavoti) return transient failures as
+    Server-Sent-Events even for non-streaming requests (``"stream": false``)::
+
+        event: error
+        data: {"error": {"type": "service_unavailable",
+                         "message": "Service temporarily unavailable, please retry later"}}
+
+    Returns ``{"type": ..., "message": ...}`` when the body is an SSE error
+    frame, otherwise ``None``.
+    """
+    if not raw_text or "event:" not in raw_text or "data:" not in raw_text:
+        return None
+    event_name = None
+    data_chunks = []
+    for line in raw_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("event:"):
+            event_name = stripped[len("event:"):].strip()
+        elif stripped.startswith("data:"):
+            data_chunks.append(stripped[len("data:"):].strip())
+    if event_name != "error" or not data_chunks:
+        return None
+    try:
+        payload = json.loads("\n".join(data_chunks))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error_obj = payload.get("error", payload)
+    if isinstance(error_obj, dict):
+        return {
+            "type": str(error_obj.get("type", "")),
+            "message": str(error_obj.get("message", "")),
+        }
+    return {"type": "", "message": str(error_obj)}
+
+
 def _split_trailing_think_close(text: str) -> Tuple[str, Optional[str]]:
     """Split text on </think> or </thinking> marker — returns (actual_thinking, trailing_final_response).
 
@@ -269,6 +309,11 @@ class LLMClient:
         self._codex_provider_id = self.provider or "codex"
         # Cache for global LLM settings (avoids repeated DB reads in hot path).
         # TTL-based, simple dict — intentionally lock-free (worst case: 1 extra DB read).
+        # Optional per-call retry override. When set (not None), it takes
+        # precedence over the global llm_max_retries setting. Callers that
+        # need bounded latency (e.g. photo validation fallback chains) set
+        # this to 0 so one slow provider cannot stall the whole request.
+        self.max_retries: Optional[int] = None
         self._settings_cache = {}
         self._settings_cache_time = 0
 
@@ -361,6 +406,7 @@ class LLMClient:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         log_file: Optional[str] = None,
+        tool_choice: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Delegate chat completion to CodexClient (Responses API)."""
         from models.db import db as _db
@@ -389,6 +435,7 @@ class LLMClient:
             tools=tools,
             reasoning=bool(self.thinking),
             timeout=self.timeout or 120,
+            tool_choice=tool_choice,
         )
         duration_ms = int((time.time() - start_time) * 1000)
 
@@ -481,6 +528,7 @@ class LLMClient:
         enable_thinking: bool = True,
         max_tokens: Optional[int] = None,
         log_file: Optional[str] = None,
+        tool_choice: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Send chat completion request to OpenAI-compatible endpoint.
 
@@ -498,6 +546,7 @@ class LLMClient:
             max_tokens: Optional override for max output tokens. If None,
                 uses self.max_tokens (doubled when thinking is active).
             log_file: Optional path for API call logging.
+            tool_choice: Optional function name that the provider must call.
 
         Returns:
             Dict with response, duration_ms, token counts, success flag,
@@ -509,7 +558,8 @@ class LLMClient:
             retry count via llm_max_retries setting (DB default: 5).
         """
         if self.api_format == "codex":
-            return self._codex_chat_completion(messages, tools, temperature, max_tokens, log_file)
+            return self._codex_chat_completion(
+                messages, tools, temperature, max_tokens, log_file, tool_choice)
 
         is_ollama_fmt = self.api_format == "ollama" or (
             self.base_url and "ollama.com" in self.base_url
@@ -637,6 +687,9 @@ class LLMClient:
                 payload["options"]["temperature"] = effective_temperature
             if tools:
                 payload["tools"] = tools
+                if tool_choice:
+                    payload["tool_choice"] = {
+                        "type": "function", "function": {"name": tool_choice}}
         elif is_anthropic:
             # Anthropic API uses /messages endpoint with different payload structure.
             # Extract system messages into top-level "system" field.
@@ -662,7 +715,9 @@ class LLMClient:
                         "input_schema": fn.get("parameters", {}),
                     })
                 payload["tools"] = anthropic_tools
-                payload["tool_choice"] = {"type": "auto"}
+                payload["tool_choice"] = (
+                    {"type": "tool", "name": tool_choice}
+                    if tool_choice else {"type": "auto"})
         else:
             payload = {
                 "model": self.model,
@@ -674,6 +729,9 @@ class LLMClient:
                 payload["temperature"] = effective_temperature
             if tools:
                 payload["tools"] = tools
+                if tool_choice:
+                    payload["tool_choice"] = {
+                        "type": "function", "function": {"name": tool_choice}}
 
         if is_anthropic:
             headers = {
@@ -683,7 +741,10 @@ class LLMClient:
             if self.api_key:
                 headers["x-api-key"] = self.api_key
         else:
-            headers = {"Content-Type": "application/json"}
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            }
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
 
@@ -691,9 +752,9 @@ class LLMClient:
             from models.db import db as _db
 
             _val = self._get_cached_setting("llm_max_retries", _db.get_setting, "llm_max_retries", None)
-            max_retries = int(_val) if _val is not None else 5
+            max_retries = self.max_retries if self.max_retries is not None else (int(_val) if _val is not None else 5)
         except Exception:
-            max_retries = 5
+            max_retries = self.max_retries if self.max_retries is not None else 5
         last_error_result = None
 
         for attempt in range(1 + max_retries):
@@ -1070,7 +1131,61 @@ class LLMClient:
                     if "start_time" in locals()
                     else 0
                 )
-                raw_snippet = getattr(response, "text", "(no response)")[:500]
+                raw_text = getattr(response, "text", "(no response)")
+                raw_snippet = raw_text[:500]
+
+                # Some gateways return transient failures as SSE error frames
+                # (`event: error` / `data: {...}`) even when the request is
+                # non-streaming. Extract the embedded error and classify
+                # transient upstream errors as provider_error so callers can
+                # retry or fall back to the next configured model.
+                sse_error = _parse_sse_error_frame(raw_text)
+                if sse_error is not None:
+                    err_type = (sse_error.get("type") or "").lower()
+                    err_message = sse_error.get("message") or ""
+                    err_blob = (err_type + ": " + err_message).strip(": ")
+                    is_transient = (
+                        "unavailable" in err_type
+                        or "overloaded" in err_type
+                        or "internal" in err_type
+                        or "rate_limit" in err_type
+                        or "timeout" in err_type
+                        or "server_error" in err_type
+                        or "unavailable" in err_message.lower()
+                        or "overloaded" in err_message.lower()
+                        or "retry later" in err_message.lower()
+                    )
+                    error_type = "provider_error" if is_transient else "parse_error"
+                    error_detail = (
+                        f"LLM provider returned SSE error event: "
+                        f"{err_blob or '(unknown error)'}. "
+                        f"Raw response: {raw_snippet}"
+                    )
+                    log_api_call(
+                        messages,
+                        None,
+                        elapsed_ms,
+                        error=(
+                            f"[attempt {attempt + 1}/{1 + max_retries}] "
+                            f"SSE error event: {err_blob or raw_snippet}"
+                        ),
+                        log_file=log_file,
+                    )
+                    last_error_result = {
+                        "response": {"error": _format_llm_error(error_type)},
+                        "duration_ms": elapsed_ms,
+                        "success": False,
+                        "error_type": error_type,
+                        "error_detail": error_detail,
+                    }
+                    # Transient upstream error — retry once with a short wait,
+                    # then return so the caller (llm_loop / describe_image) can
+                    # move to its own retry/fallback path quickly.
+                    if is_transient and attempt < min(max_retries, 1):
+                        time.sleep(2)
+                        continue
+                    return last_error_result
+
                 log_api_call(
                     messages,
                     None,

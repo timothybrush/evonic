@@ -1021,6 +1021,17 @@ class AgentChatDB:
                 "SELECT id, content, category, source_session_id, created_at, updated_at, expired, dimension, superseded_by FROM memories WHERE dimension IS NULL AND expired = 0 AND superseded_by IS NULL ORDER BY updated_at DESC LIMIT 10000")
             return [dict(r) for r in cursor.fetchall()]
 
+    def get_active_dimensions(self, limit: int = 50) -> List[str]:
+        """Distinct dimensions (keys) of active memories, most recently updated first."""
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT dimension, MAX(updated_at) AS mu FROM memories "
+                "WHERE dimension IS NOT NULL AND expired = 0 AND superseded_by IS NULL "
+                "GROUP BY dimension ORDER BY mu DESC LIMIT ?",
+                (limit,))
+            return [r[0] for r in cursor.fetchall()]
+
     def supersede_memory(self, old_memory_id: int, new_memory_id: int):
         """Mark old_memory_id as superseded by new_memory_id."""
         with self._connect() as conn:
@@ -1059,6 +1070,20 @@ class AgentChatManager:
                 if agent_id not in self._dbs:
                     self._dbs[agent_id] = AgentChatDB(agent_id)
         return self._dbs[agent_id]
+
+    def drop(self, agent_id: str) -> None:
+        """Drop a cached AgentChatDB (e.g. when the agent is deleted).
+
+        Closes the persistent connection first so it cannot keep reading a
+        chat.db inode that is about to be unlinked from disk. Without this,
+        recreating an agent with the same id returns the stale cached
+        instance whose connection points at the deleted file → queries
+        fail with 'no such table: chat_sessions'.
+        """
+        with self._lock:
+            db = self._dbs.pop(agent_id, None)
+        if db is not None:
+            db.close()
 
 
 agent_chat_manager = AgentChatManager()

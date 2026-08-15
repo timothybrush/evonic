@@ -502,6 +502,8 @@ def run_tool_loop(agent: Dict[str, Any],
         'external_user_id': external_user_id, 'channel_id': channel_id,
         'message_id': agent_context.get('trusted_message_id'),
         'attachment_ids': list(agent_context.get('trusted_attachment_ids') or []),
+        'attachment_mime_types': list(
+            agent_context.get('trusted_attachment_mime_types') or []),
         'turn_index': _turn_index,
     }
 
@@ -527,6 +529,13 @@ def run_tool_loop(agent: Dict[str, Any],
                                        'turn')
     _suppress_intermediate = bool(
         _turn_decision and _turn_decision.get('suppress_intermediate'))
+    _required_tool = str(
+        (_turn_decision or {}).get('required_tool') or '').strip()
+    _required_tool_pending = bool(_required_tool)
+    if _required_tool_pending:
+        event_stream.emit('required_tool_enforced', {
+            **_gate_context, 'tool_name': _required_tool,
+        })
 
     real_exec = tool_registry.get_real_executor(agent_context)
 
@@ -1164,7 +1173,8 @@ def run_tool_loop(agent: Dict[str, Any],
                 temperature=None,
                 enable_thinking=_enable_thinking_this_call,
                 max_tokens=None,
-                log_file=llm_log_path
+                log_file=llm_log_path,
+                tool_choice=_required_tool if _required_tool_pending else None,
             )
 
         # Check A: stop signal check after LLM call (earliest safe point)
@@ -1521,7 +1531,9 @@ def run_tool_loop(agent: Dict[str, Any],
                             temperature=None,
                             enable_thinking=_enable_thinking_this_call,
                             max_tokens=None,
-                            log_file=llm_log_path
+                            log_file=llm_log_path,
+                            tool_choice=(
+                                _required_tool if _required_tool_pending else None),
                         )
                     if _fallback_result.get('success'):
                         _logger.info(
@@ -1899,6 +1911,26 @@ def run_tool_loop(agent: Dict[str, Any],
             # follow-up instruction that forces the LLM back into the loop.
             from backend.plugin_manager import run_message_interceptors
             pre_final_injections = run_message_interceptors(agent_id, content, messages)
+
+            # Core guard: never let a final answer link local filesystem
+            # paths — the user cannot open them (they render as broken
+            # links). Detect such links and inject a corrective instruction
+            # so the LLM re-answers using send_file/save_artifact instead.
+            from backend.tools.local_path_link_guard import (
+                build_corrective_injection,
+                detect_local_path_links,
+            )
+            local_links = detect_local_path_links(content or "")
+            if local_links:
+                _logger.warning(
+                    "Local-path links blocked in final answer (agent=%s, session=%s): %s",
+                    agent_id, session_id, local_links,
+                )
+                pre_final_injections.append({
+                    "role": "user",
+                    "content": build_corrective_injection(local_links),
+                })
+
             if pre_final_injections:
                 # Save this response as an intermediate assistant message so the
                 # LLM sees it as context, then append the injected instructions.
@@ -2124,6 +2156,8 @@ def run_tool_loop(agent: Dict[str, Any],
                 'external_user_id': external_user_id, 'channel_id': channel_id,
                 'tool_name': fn_name, 'tool_args': args, 'param_types': pt,
             })
+            if _required_tool_pending and fn_name == _required_tool:
+                _required_tool_pending = False
             _tool_call_counts[fn_name] = _tool_call_counts.get(fn_name, 0) + 1
             _tool_records.append((tc, fn_name, args, pt))
 
