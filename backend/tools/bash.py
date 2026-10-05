@@ -11,6 +11,7 @@ New backends (E2B, etc.) plug in without changing this file.
 
 import logging
 import re
+from typing import Optional
 
 from backend.tools.lib.exec_backend import registry, validate_env_keys
 
@@ -198,7 +199,7 @@ def execute(agent: dict, args: dict) -> dict:
     # Identify background spawns so the agent can attach a monitor to them.
     # Registration is silent — nothing watches or notifies on its own.
     try:
-        job = _track_background_spawn(session_id, script, result)
+        job = _track_background_spawn(session_id, script, result, agent)
         if job:
             result['background_job'] = {
                 'job_id': job.job_id,
@@ -213,7 +214,8 @@ def execute(agent: dict, args: dict) -> dict:
     return result
 
 
-def _track_background_spawn(session_id: str, script: str, result: dict):
+def _track_background_spawn(session_id: str, script: str, result: dict,
+                            agent: Optional[dict] = None):
     """Register a background spawn after successful execution.
 
     Handles both long_running_guard wrapper scripts (BYPASS_MARKER) and the
@@ -225,12 +227,18 @@ def _track_background_spawn(session_id: str, script: str, result: dict):
         return None
 
     from backend.agent_runtime.background_jobs import (
-        parse_wrapper_script, parse_manual_spawn, background_jobs)
+        parse_wrapper_script, parse_manual_spawn, background_jobs,
+        snapshot_backend_ctx)
+
+    # Capture which sandbox this ran in so a monitor attached later polls the
+    # SAME one (its persisted schedule only has agent_id and would otherwise
+    # resolve — or recreate — a different sandbox).
+    backend_ctx = snapshot_backend_ctx(agent or {})
 
     _spawn = parse_wrapper_script(script) or parse_manual_spawn(script)
     if not _spawn:
         return None
-    return background_jobs.register(session_id, **_spawn)
+    return background_jobs.register(session_id, backend_ctx=backend_ctx, **_spawn)
 
 
 # ---------------------------------------------------------------------------
