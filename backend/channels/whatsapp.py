@@ -197,6 +197,43 @@ def _format_attachment_marker(attachment_info: Dict[str, Any]) -> str:
     )
 
 
+def _normalize_location_payload(location_data: Any) -> Optional[Dict[str, Any]]:
+    """Validate the bridge location payload and coerce numeric coordinates."""
+    if not isinstance(location_data, dict):
+        return None
+    try:
+        latitude = float(location_data.get('latitude'))
+        longitude = float(location_data.get('longitude'))
+    except (TypeError, ValueError):
+        _logger.warning("WhatsApp location payload has invalid coordinates: %r",
+                        location_data)
+        return None
+    if not (-90.0 <= latitude <= 90.0) or not (-180.0 <= longitude <= 180.0):
+        _logger.warning("WhatsApp location coordinates out of range: %s, %s",
+                        latitude, longitude)
+        return None
+    return {
+        'latitude': latitude,
+        'longitude': longitude,
+        'name': str(location_data.get('name') or '').strip(),
+        'address': str(location_data.get('address') or '').strip(),
+        'accuracy_in_meters': location_data.get('accuracy_in_meters'),
+        'is_live': bool(location_data.get('is_live')),
+    }
+
+
+def _format_location_text(location_data: Dict[str, Any]) -> str:
+    """Render a shared location as agent-readable text with a maps link."""
+    latitude = location_data['latitude']
+    longitude = location_data['longitude']
+    label = location_data.get('name') or location_data.get('address') or ''
+    kind = 'Live location' if location_data.get('is_live') else 'Location'
+    header = f'[{kind} shared]' + (f' {label}' if label else '')
+    return (f'{header}\n'
+            f'latitude={latitude}, longitude={longitude}\n'
+            f'https://www.google.com/maps?q={latitude},{longitude}')
+
+
 def _format_quoted_context(quoted_text=None, quoted_message=None,
                            quoted_is_bot=False, quoted_sender_name='',
                            quoted_sender='', is_group=False) -> str:
@@ -369,18 +406,50 @@ class WhatsAppChannel(BaseChannel):
         message silently."""
         return self.agent_id
 
+    def _request_group_approval(self, group_id: str, group_name: str) -> None:
+        """Create a pending approval for an unapproved group (idempotent).
+
+        Unlike DMs, no pairing code is sent into the group — the admin
+        approves the group from the channel's Pending Approvals list. Once
+        approved, every group member can chat with the agent via @mention.
+        The pending entry lives 24h; each new group message recreates it
+        after expiry so it stays visible while the group is active.
+        """
+        from models.db import db
+        from datetime import datetime, timedelta
+        try:
+            existing = db.get_pending_approvals(self.channel_id)
+            if any(p.get('external_user_id') == group_id for p in existing):
+                return
+            expires_at = (datetime.utcnow() + timedelta(hours=24)).isoformat()
+            db.create_pending_approval(
+                channel_id=self.channel_id,
+                external_user_id=group_id,
+                user_name=group_name or group_id,
+                pair_code=db._generate_pair_code(),
+                expires_at=expires_at,
+            )
+            _logger.info(
+                "WhatsApp group approval requested: group=%s name=%r channel=%s",
+                group_id, group_name, self.channel_id)
+        except Exception as e:
+            _logger.warning("Failed to create group pending approval: %s", e)
+
     def _gate_sender(self, sender: str, is_group: bool, jid: str, text: str,
                      push_name: str, payload: dict) -> bool:
         """Allowlist/pairing gate — returns True when the message should be
         processed. Groups are checked by group ID, DMs by individual user ID.
+        Unapproved groups raise a pending approval request (visible in the
+        channel modal) instead of being dropped silently.
         Subclasses may override (e.g. when a routing table is the allowlist)."""
         from models.db import db
         if is_group:
             group_id = jid.split('@')[0] if '@' in jid else jid
-            if not db.is_user_allowed(self.channel_id, group_id):
-                _logger.info("WhatsApp group not in allowlist: group=%s", group_id)
-                return False
-            return True
+            if db.is_user_allowed(self.channel_id, group_id):
+                return True
+            self._request_group_approval(group_id, (payload or {}).get('group_name') or '')
+            _logger.info("WhatsApp group not in allowlist (approval pending): group=%s", group_id)
+            return False
 
         user_name = push_name or payload.get('name') or sender
 
@@ -803,6 +872,7 @@ class WhatsAppChannel(BaseChannel):
         audio_data = payload.get('audio')
         video_data = payload.get('video')
         document_data = payload.get('document')
+        location_data = _normalize_location_payload(payload.get('location'))
         quoted_text = payload.get('quoted_text')
         quoted_message = payload.get('quoted_message')
         quoted_context = _format_quoted_context(
@@ -826,7 +896,7 @@ class WhatsAppChannel(BaseChannel):
             msg_type = 'document'
         elif payload.get('sticker'):
             msg_type = 'sticker'
-        elif payload.get('location'):
+        elif location_data:
             msg_type = 'location'
 
         # Resolve before emitting diagnostics so the listener can report the route
@@ -884,6 +954,12 @@ class WhatsAppChannel(BaseChannel):
                          agent_id, sender, text[:80] if text else "")
             return
 
+        # Allowlist check — groups use group ID, DMs use individual user ID.
+        # Runs before the mention gate so that any activity in an unapproved
+        # group surfaces a pending approval request in the channel modal.
+        if not self._gate_sender(sender, is_group, jid, text, push_name, payload):
+            return
+
         # In groups, only respond when @mentioned or when user replies to a bot message
         if is_group and not bot_mentioned and not quoted_is_bot:
             _logger.info("WhatsApp group message dropped (not mentioned): sender=%s text=%s", sender, text[:80] if text else "")
@@ -892,10 +968,6 @@ class WhatsAppChannel(BaseChannel):
         # Strip the @mention tag from the message text
         if bot_mentioned and text:
             text = re.sub(r'@\d+', '', text).strip()
-
-        # Allowlist check — groups use group ID, DMs use individual user ID
-        if not self._gate_sender(sender, is_group, jid, text, push_name, payload):
-            return
 
         image_url = None
         video_url = None
@@ -954,6 +1026,9 @@ class WhatsAppChannel(BaseChannel):
         elif payload.get('document_download_failed') and not text:
             text = '[Document download failed]'
 
+        if location_data and not text:
+            text = _format_location_text(location_data)
+
         if not text and not image_url and not video_url and not quoted_context:
             _logger.info("WhatsApp message dropped (no usable content): sender=%s", sender)
             return
@@ -1011,8 +1086,22 @@ class WhatsAppChannel(BaseChannel):
         if not db.is_session_bot_enabled(session_id, agent_id=agent_id):
             _logger.info("WhatsApp message stored only — bot disabled for session %s (sender=%s)",
                          session_id, sender)
-            db.add_chat_message(session_id, 'user', final_text or text or '[Attachment]',
-                                agent_id=agent_id)
+            stored = final_text or text or '[Attachment]'
+            message_id = db.add_chat_message(
+                session_id, 'user', stored, agent_id=agent_id,
+            )
+            message_id = message_id if type(message_id) in (int, str) else None
+            from models.chatlog import chatlog_manager
+            chatlog_manager.get(agent_id, session_id).append({
+                'type': 'user', 'session_id': session_id, 'content': stored,
+                'sender_id': session_user_id, 'message_id': message_id,
+            })
+            from backend.event_stream import event_stream
+            event_stream.emit('message_received', {
+                'agent_id': agent_id, 'session_id': session_id,
+                'external_user_id': session_user_id, 'channel_id': self.channel_id,
+                'message': stored, 'message_id': message_id, 'role': 'user',
+            })
             return
 
         _logger.info("WhatsApp message received from %s (channel %s)", sender, self.channel_id)
@@ -1217,6 +1306,9 @@ class WhatsAppChannel(BaseChannel):
                 'original_filename': safe_name,
                 'mime_type': mime_type,
                 'size_bytes': len(document_bytes),
+                # A document sent as a file may still be an image; the web chat
+                # keys its preview off this flag.
+                'is_image': mime_type.startswith('image/'),
                 'file_path': file_path,
             }
         except Exception as exc:

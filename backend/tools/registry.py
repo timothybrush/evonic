@@ -12,10 +12,13 @@ import sys
 import glob
 import json
 import types
+import logging
 import threading
 import importlib
 import importlib.util
 from typing import Dict, Any, Optional, Callable, List
+
+_logger = logging.getLogger(__name__)
 
 # Directory containing tool backend Python files
 TOOLS_DIR = os.path.join(os.path.dirname(__file__))
@@ -200,6 +203,14 @@ class ToolRegistry:
                         for tid in _assigned
                     )
                     if not _namespaced_match:
+                        _logger.warning(
+                            "Authorization guard blocked tool '%s' for agent '%s' "
+                            "(session=%s user=%s): tool is not in assigned_tool_ids",
+                            function_name,
+                            ctx.get('agent_id', '?'),
+                            ctx.get('session_id', '?'),
+                            ctx.get('user_id', '?'),
+                        )
                         return {
                             "error": (
                                 f"Tool '{function_name}' is not assigned to this agent. "
@@ -583,7 +594,13 @@ def _builtin_update_tasks_factory(agent_context: dict):
             "name": "update_tasks",
             "description": (
                 "Manage your implementation task list "
-                "(set, add, update status, remove). CRITICAL: Each entry must be "
+                "(set, add, update status, remove).\n"
+                "WHEN TO CALL (mandatory bookkeeping): 'set' the list before "
+                "starting multi-step work; 'in_progress' when you begin a task; "
+                "'done' the moment a task's work is finished — always BEFORE "
+                "giving your final answer. Never end a turn that did "
+                "implementation work without reconciling task statuses.\n"
+                "CRITICAL: Each entry must be "
                 "ATOMIC — exactly one concrete action or outcome that can be "
                 "completed independently. Split multi-action work into separate "
                 "entries; never batch several actions into one task.\n"

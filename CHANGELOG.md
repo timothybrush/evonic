@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+- Kanban board: task title text now flashes solid yellow and fades back to its original color (1s default) every time the assigned agent calls a tool, driven by the durable `kanban` realtime (SSE) channel.
+- Plugin detail pages now turn every `<slug>_tab.html` a plugin ships in its `templates/` directory into an extra tab (label = the humanised slug) and call `window.tabInit_<slug>()` when the tab is opened, so plugins can add an admin page to their own detail view without a navbar entry or a core change. Used by the tiyasancloud *Manage* tab.
+
+### Bug Fixes
+
+- Fixed the chat typography hierarchy: with a browser default font size below 16px, the user's own message and the composer shrank to the size of the agent reasoning/timeline lines (or smaller), so the reasoning text looked larger than the user's input. Both tiers are now sized in rem (`0.9375rem` / `0.6875rem`), keeping the ratio identical at every root font size.
+- LLM clients now retry once on their configured fallback model when the primary call fails. Shared callers (task and CMP classifiers, plugin helpers, dashboard enhancements) previously received the raw primary error whenever they did not run through the agent runtime.
+- Set the global default model fallback (`default_model_fallback_id`) to `deepseek/deepseek-v4-flash` so the default model has somewhere to fail over to.
+- Kanban comment follow-up: a failed classifier LLM call no longer counts as "no follow-up needed". The comment stays unconsumed and is retried on the next scan instead of being silently dropped, which used to lose user comments whenever the classifier model was unavailable.
+- The root filesystem scan guard (`find /`, `tree /`) is now switchable: flip *Root Filesystem Scan Guard* in System → Settings, or set `RFS_GUARD_DISABLED=1` (`config.ROOT_FS_SCAN_GUARD_ENABLED`) to force-disable it process-wide, to run root scans without the approval prompt. It was hardcoded outside the safety pipeline, so the per-agent *Safety Checker* toggle could not silence it. The Safety Checker tooltip used to claim that disabling it meant “full autopilot — agent runs all code without approval prompts”; it now names the two system-level guards that still apply and how to control them.
+
 ## [1.2.0] - 2026-08-14
 
 ### Features

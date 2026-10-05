@@ -783,11 +783,43 @@ class SchemaMixin:
                 "auth_type TEXT DEFAULT 'api_key'",
                 "refresh_token TEXT",
                 "token_expires_at INTEGER",
+                "credential_source TEXT DEFAULT 'api_key'",
             ]:
                 try:
                     cursor.execute(f"ALTER TABLE providers ADD COLUMN {col}")
                 except sqlite3.OperationalError:
                     pass
+
+            # Built-in subscription providers. Kept outside the one-shot seed
+            # migration so existing installations receive them too.
+            cursor.executemany(
+                "INSERT OR IGNORE INTO providers "
+                "(id, name, type, base_url, api_format, auth_type, credential_source) "
+                "VALUES (?, ?, 'remote', ?, ?, ?, ?)",
+                [
+                    (
+                        "openai-codex",
+                        "OpenAI Codex",
+                        "https://chatgpt.com/backend-api/codex",
+                        "codex",
+                        "",
+                        "",
+                    ),
+                    (
+                        "anthropic",
+                        "Anthropic / Claude Code",
+                        "https://api.anthropic.com/v1",
+                        "anthropic",
+                        "api_key",
+                        "api_key",
+                    ),
+                ],
+            )
+            cursor.execute(
+                "UPDATE providers SET credential_source = "
+                "CASE WHEN COALESCE(api_key, '') <> '' THEN 'evonic_oauth' ELSE '' END "
+                "WHERE api_format = 'codex' AND credential_source = 'api_key'"
+            )
 
             # ==================== LLM Models Table ====================
 
@@ -1035,6 +1067,11 @@ class SchemaMixin:
                 pass
             try:
                 cursor.execute("ALTER TABLE agents ADD COLUMN disabled_slash_commands TEXT DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass
+            # Migration: per-agent /help command toggle (1 = respond to /help, 0 = ignore)
+            try:
+                cursor.execute("ALTER TABLE agents ADD COLUMN help_enabled BOOLEAN DEFAULT 1")
             except sqlite3.OperationalError:
                 pass
 

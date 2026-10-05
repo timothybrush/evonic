@@ -37,6 +37,51 @@ _LLM_ERROR_MESSAGES = {
 }
 
 
+def _normalize_system_messages(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Return a provider-safe message snapshot with system instructions first.
+
+    Strict chat templates, including Qwen templates used by llama.cpp, reject
+    any system-role message after the conversation begins. Consolidate every
+    system message at index 0 while preserving the exact order and fields of
+    all non-system messages. Caller-owned dictionaries and the input list are
+    never mutated.
+    """
+    copied_messages = [message.copy() for message in messages]
+    system_messages = [
+        message for message in copied_messages
+        if message.get("role") == "system"
+    ]
+    if not system_messages:
+        return copied_messages
+
+    non_system_messages = [
+        message for message in copied_messages
+        if message.get("role") != "system"
+    ]
+    merged_system = system_messages[0].copy()
+    if len(system_messages) > 1:
+        def _content_text(content: Any) -> str:
+            if isinstance(content, str):
+                return content
+            if content is None:
+                return ""
+            return json.dumps(
+                content,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+
+        merged_system["content"] = "\n\n".join(
+            _content_text(message.get("content", ""))
+            for message in system_messages
+        )
+
+    return [merged_system, *non_system_messages]
+
+
 def _format_llm_error(error_type: str, context: Optional[Dict[str, Any]] = None) -> str:
     """Format an LLM error type into a user-friendly message.
 
@@ -243,16 +288,29 @@ class LLMClient:
     Supports llama.cpp, OpenAI, and other OpenAI-compatible backends.
     """
 
-    def __init__(self, model_config: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        model_config: Optional[Dict[str, Any]] = None,
+        fallback_model_config: Optional[Dict[str, Any]] = None,
+        _allow_fallback: bool = True,
+    ):
         """Initialize LLMClient with optional model_config.
 
         Args:
             model_config: Dict with keys: base_url, api_key, model_name, timeout,
-                         thinking (bool), thinking_budget (int), max_tokens, temperature.
+                         thinking (bool), thinking_budget (int), max_tokens, temperature,
+                         and optional service_tier.
                          If None, uses the default model from DB or config.py defaults.
+            fallback_model_config: Optional model config retried once when the
+                         primary call fails.  Explicitly passed by shared
+                         callers (classifiers, plugins); None means no implicit
+                         fallback unless this client uses the global default.
         """
         self.provider = None
+        self.service_tier = model_config.get("service_tier") if model_config else None
+        self._model_api_key_override = False
         if model_config:
+            self._model_api_key_override = bool(model_config.get("api_key"))
             try:
                 from models.db import db
                 model_config = db.resolve_model_config(model_config)
@@ -274,6 +332,7 @@ class LLMClient:
 
                 dm = db.get_default_model()
                 if dm:
+                    self._model_api_key_override = bool(dm.get("api_key"))
                     dm = db.resolve_model_config(dm)
                     self.provider = dm.get("provider")
                     self.base_url = dm.get("base_url")
@@ -307,6 +366,14 @@ class LLMClient:
                 self.api_format = "openai"
         self._cached_model_name = None
         self._codex_provider_id = self.provider or "codex"
+        # Fallback model support: retried once when the primary call fails.
+        # An explicit model_config means the caller chose this model, so no
+        # fallback is added implicitly; a client built with the global default
+        # (model_config=None) resolves `default_model_fallback_id` instead.
+        self._explicit_model_config = model_config
+        self._fallback_config = fallback_model_config
+        self._allow_fallback = _allow_fallback
+        self._fallback_client: Optional["LLMClient"] = None
         # Cache for global LLM settings (avoids repeated DB reads in hot path).
         # TTL-based, simple dict — intentionally lock-free (worst case: 1 extra DB read).
         # Optional per-call retry override. When set (not None), it takes
@@ -436,6 +503,7 @@ class LLMClient:
             reasoning=bool(self.thinking),
             timeout=self.timeout or 120,
             tool_choice=tool_choice,
+            service_tier=getattr(self, "service_tier", None),
         )
         duration_ms = int((time.time() - start_time) * 1000)
 
@@ -530,6 +598,95 @@ class LLMClient:
         log_file: Optional[str] = None,
         tool_choice: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Send a chat completion, retrying once on the fallback model.
+
+        Runs the primary model via :meth:`_chat_completion_once`.  When that
+        fails and a fallback model applies, the same request is retried once
+        on the fallback client.  This keeps callers that never touch the agent
+        runtime (classifiers, plugins, dashboards) failing over exactly like
+        agents do, instead of silently returning the primary error.
+
+        A successful fallback result is tagged with ``fallback_used``,
+        ``primary_model`` and ``primary_error_type``.  When the fallback also
+        fails, the primary result is returned so callers keep the original
+        error semantics.
+        """
+        result = self._chat_completion_once(
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            enable_thinking=enable_thinking,
+            max_tokens=max_tokens,
+            log_file=log_file,
+            tool_choice=tool_choice,
+        )
+        if result.get("success") or not self._allow_fallback:
+            return result
+
+        fallback = self._get_fallback_client()
+        if fallback is None:
+            return result
+
+        fallback_result = fallback._chat_completion_once(
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            enable_thinking=enable_thinking,
+            max_tokens=max_tokens,
+            log_file=log_file,
+            tool_choice=tool_choice,
+        )
+        if not fallback_result.get("success"):
+            return result
+
+        fallback_result["fallback_used"] = True
+        fallback_result["primary_model"] = self.model
+        fallback_result["primary_error_type"] = result.get("error_type")
+        return fallback_result
+
+    def _get_fallback_client(self) -> Optional["LLMClient"]:
+        """Return a client for the fallback model, or None when none applies.
+
+        An explicitly configured fallback wins.  A client created without an
+        explicit model config (the global default model) resolves the
+        ``default_model_fallback_id`` setting instead, so shared callers get
+        the same failover agents have.  A model identical to the primary is
+        skipped to avoid retrying the same endpoint.  Positive resolutions are
+        cached; the None case is recomputed so a later setting change applies.
+        """
+        if self._fallback_client is not None:
+            return self._fallback_client
+        try:
+            config = self._fallback_config
+            if config is None and self._explicit_model_config is None:
+                from models.db import db
+                fallback_id = db.get_setting("default_model_fallback_id", "")
+                config = db.get_model_by_id(fallback_id) if fallback_id else None
+            if not config or not config.get("enabled", True):
+                return None
+            same_target = (
+                config.get("model_name") == self.model
+                and (config.get("base_url") or "") == (self.base_url or "")
+            )
+            if same_target:
+                return None
+            self._fallback_client = LLMClient(
+                model_config=config, _allow_fallback=False)
+        except Exception as exc:
+            print(f"[llm_client] could not build fallback client: {exc}")
+            return None
+        return self._fallback_client
+
+    def _chat_completion_once(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        temperature: Optional[float] = None,
+        enable_thinking: bool = True,
+        max_tokens: Optional[int] = None,
+        log_file: Optional[str] = None,
+        tool_choice: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Send chat completion request to OpenAI-compatible endpoint.
 
         Processes messages (normalizes quotes, injects thinking prompts for
@@ -557,9 +714,11 @@ class LLMClient:
             exponential backoff (max 60s between retries). Configurable
             retry count via llm_max_retries setting (DB default: 5).
         """
+        provider_messages = _normalize_system_messages(messages)
         if self.api_format == "codex":
             return self._codex_chat_completion(
-                messages, tools, temperature, max_tokens, log_file, tool_choice)
+                provider_messages, tools, temperature, max_tokens, log_file,
+                tool_choice)
 
         is_ollama_fmt = self.api_format == "ollama" or (
             self.base_url and "ollama.com" in self.base_url
@@ -568,6 +727,17 @@ class LLMClient:
             self.base_url and "anthropic.com" in self.base_url
         )
         is_anthropic = self.api_format == "anthropic"
+        anthropic_token = self.api_key
+        anthropic_oauth = False
+        if is_anthropic:
+            from backend.provider.claude_code import is_oauth_token, resolve_credential
+            if getattr(self, "_model_api_key_override", False):
+                anthropic_oauth = is_oauth_token(anthropic_token or "")
+            else:
+                from models.db import db as _provider_db
+                anthropic_token, anthropic_oauth = resolve_credential(
+                    _provider_db, self.provider or "anthropic"
+                )
         # Cerebras is a strict OpenAI-compatible validator: it rejects the
         # non-standard reasoning_content field on input messages (unlike
         # OpenCode Go / MiniMax / DeepSeek, which require it round-tripped).
@@ -615,7 +785,7 @@ class LLMClient:
             or "gemma-4-base" in model_lower
         )
 
-        for msg in messages:
+        for msg in provider_messages:
             new_msg = msg.copy()
             if isinstance(new_msg.get("content"), str):
                 new_msg["content"] = normalize_llm_text(new_msg["content"])
@@ -626,22 +796,6 @@ class LLMClient:
                     new_msg["content"] = "<|think|>\n" + new_msg["content"]
                     thinking_injected = True
             processed_messages.append(new_msg)
-
-        # Merge multiple leading system messages into one to satisfy strict chat
-        # templates (e.g. Llama 3.x) that only allow a single system message.
-        n_sys = 0
-        for m in processed_messages:
-            if m.get("role") == "system":
-                n_sys += 1
-            else:
-                break
-        if n_sys > 1:
-            combined_content = "\n\n".join(
-                m.get("content", "") for m in processed_messages[:n_sys]
-            )
-            merged = processed_messages[0].copy()
-            merged["content"] = combined_content
-            processed_messages = [merged] + processed_messages[n_sys:]
 
         # Handle reasoning_content field based on thinking mode.
         # Some models (e.g. DeepSeek-v4) produce reasoning_content automatically
@@ -702,6 +856,11 @@ class LLMClient:
             }
             if system_msgs:
                 payload["system"] = "\n\n".join(system_msgs) if len(system_msgs) > 1 else system_msgs[0]
+            if anthropic_oauth:
+                from backend.provider.claude_code import SYSTEM_PREFIX
+                payload["system"] = SYSTEM_PREFIX + (
+                    "\n\n" + payload["system"] if payload.get("system") else ""
+                )
             if effective_temperature is not None:
                 payload["temperature"] = effective_temperature
             # Transform OpenAI tools -> Anthropic tools format
@@ -734,12 +893,8 @@ class LLMClient:
                         "type": "function", "function": {"name": tool_choice}}
 
         if is_anthropic:
-            headers = {
-                "Content-Type": "application/json",
-                "anthropic-version": "2023-06-01",
-            }
-            if self.api_key:
-                headers["x-api-key"] = self.api_key
+            from backend.provider.claude_code import auth_headers
+            headers = auth_headers(anthropic_token or "", anthropic_oauth)
         else:
             headers = {
                 "Content-Type": "application/json",

@@ -78,6 +78,17 @@ class EffectiveRequest:
 # The total wait remains bounded by AGENT_PARALLEL_TOOL_WAIT_TIMEOUT.
 _PARALLEL_TOOL_POLL_INTERVAL_SECONDS = 0.1
 
+# Injected once per turn when implementation work happened but the agent never
+# called update_tasks — the final answer is held back until the model reconciles.
+_TASK_BOOKKEEPING_REMINDER = (
+    "[SYSTEM REMINDER] You did implementation work this turn but did not "
+    "update your internal task list. Reconcile it now with update_tasks: "
+    "mark each task you finished as done (update_tasks(action='done', "
+    "task_id=N)) and keep only work you are actively continuing as "
+    "in_progress. Then repeat your final answer. If the list is already "
+    "accurate, repeat your final answer unchanged."
+)
+
 # ── Import from split modules ───────────────────────────────────────────────
 
 from backend.agent_runtime.llm_call import (
@@ -419,6 +430,9 @@ def run_tool_loop(agent: Dict[str, Any],
     from backend.event_stream import event_stream
     from models.chatlog import chatlog_manager
 
+    def _message_id(value):
+        return value if type(value) in (int, str) else None
+
     agent_id = agent['id']
     db_agent_id = session_db_agent_id or agent_id  # which per-agent DB owns this session
     external_user_id = agent_context.get('user_id')
@@ -440,7 +454,6 @@ def run_tool_loop(agent: Dict[str, Any],
         _parent_agent_id = None
     _loop_ts = int(time.time() * 1000)
     chatlog.append({'type': 'turn_begin', 'session_id': session_id, 'ts': _loop_ts})
-    event_stream.emit('turn_begin', {'session_id': session_id, 'ts': _loop_ts})
 
     tool_trace = []
     timeline = []
@@ -449,6 +462,8 @@ def run_tool_loop(agent: Dict[str, Any],
     # disable later automatic transitions for unrelated implementation tools.
     _successful_mutation = False
     _tool_errors = False
+    _explicit_task_update_turn = False  # any update_tasks call this turn (turn-scoped)
+    _task_reminder_fired = False        # bookkeeping reminder fires at most once per turn
 
     def _is_mutating_tool(tool_name: str) -> bool:
         """Return whether a tool represents implementation work."""
@@ -510,10 +525,13 @@ def run_tool_loop(agent: Dict[str, Any],
     def _finalize_gate_response(response: str, source: str):
         duration = round(time.time() - _loop_start_time, 1)
         metadata = {'plugin_gate': source, 'thinking_duration': duration}
-        db.add_chat_message(session_id, 'assistant', response,
-                            agent_id=db_agent_id, metadata=metadata)
+        message_id = _message_id(db.add_chat_message(
+            session_id, 'assistant', response,
+            agent_id=db_agent_id, metadata=metadata,
+        ))
         chatlog.append({'type': 'final', 'session_id': session_id,
-                        'content': response, 'metadata': metadata})
+                        'content': response, 'metadata': metadata,
+                        'message_id': message_id})
         chatlog.append({'type': 'turn_end', 'session_id': session_id,
                         'thinking_duration': duration})
         event_stream.emit('final_answer', {
@@ -612,8 +630,15 @@ def run_tool_loop(agent: Dict[str, Any],
     # --- Tool pruning: track how many times each tool has been called in this loop ---
     _tool_call_counts: Dict[str, int] = {}
     _TOOL_PRUNE_THRESHOLD = 3  # prune zero-call tools after this many iterations
+    # Workflow / control-plane tools are never pruned. They are characteristically
+    # needed *late* in a turn (after the threshold has already been crossed) or at
+    # the very start of the next one: state() drives the plugin state machines
+    # (e.g. state('kanban:finish') releases task focus) and use_skill() is the only
+    # way to (re)load a lazy skill's toolset. Pruning them strands workflow state --
+    # the agent finishes a task but can never close it, leaving focus held.
     _ESSENTIAL_TOOLS = {'bash', 'runpy', 'read_file', 'str_replace', 'write_file', 'patch',
-                        'set_mode', 'save_plan', 'update_tasks'}
+                        'set_mode', 'save_plan', 'update_tasks',
+                        'state', 'use_skill', 'unload_skill'}
 
     # Eager skill tools (e.g. explorer's Explore, direxplorer's Grep/Glob/Read)
     # are advertised upfront by build_tools() — never prune them mid-turn, or the
@@ -631,13 +656,33 @@ def run_tool_loop(agent: Dict[str, Any],
     except Exception:
         pass
 
+    # Add restored skill tool IDs to assigned_tool_ids for authorization guard.
+    # Keep a corresponding set of function names so tools explicitly assigned to
+    # the agent remain available for the entire turn, even before first use.
+    _assigned = agent_context.get('assigned_tool_ids')
+    if _assigned is not None:
+        for sk_id, fns in _loaded_lazy_skills.items():
+            for fn in fns:
+                if fn:
+                    _tid = f'skill:{sk_id}:{fn}'
+                    if _tid not in _assigned:
+                        _assigned.append(_tid)
+    _assigned_tool_fns = {
+        tool_id.rsplit(':', 1)[-1]
+        for tool_id in (_assigned or [])
+        if tool_id
+    }
+
     def _prune_tools(tools_list: List[dict], iteration: int) -> List[dict]:
-        """Prune zero-call tools after the threshold iteration.
-        
+        """Prune uncalled tools after the threshold while retaining assigned tools.
+
         After _TOOL_PRUNE_THRESHOLD iterations, tools that have never been called
         (call count == 0) are removed from the list sent to the LLM, except for
-        essential tools and tools belonging to a loaded lazy skill. Lazy-skill
-        tools may be injected after the threshold and must get a chance to run.
+        essential tools (including the workflow/control-plane tools ``state``,
+        ``use_skill`` and ``unload_skill``), tools explicitly assigned to the
+        agent, and tools provided by enabled skills. Assigned tools include
+        vision and media tools such as ``describe_image`` and ``transcribe_audio``
+        that may be needed only after the agent discovers a relevant attachment.
         """
         if iteration < _TOOL_PRUNE_THRESHOLD:
             return tools_list
@@ -650,6 +695,7 @@ def run_tool_loop(agent: Dict[str, Any],
         for t in tools_list:
             fn_name = t.get('function', {}).get('name', '')
             if (fn_name in _ESSENTIAL_TOOLS
+                    or fn_name in _assigned_tool_fns
                     or fn_name in _loaded_skill_fns
                     or fn_name in _eager_skill_fns
                     or _tool_call_counts.get(fn_name, 0) > 0):
@@ -660,15 +706,16 @@ def run_tool_loop(agent: Dict[str, Any],
                 len(tools_list), len(pruned), iteration, _TOOL_PRUNE_THRESHOLD)
         return pruned
 
-    # Add restored skill tool IDs to assigned_tool_ids for authorization guard
-    _assigned = agent_context.get('assigned_tool_ids')
-    if _assigned is not None:
-        for sk_id, fns in _loaded_lazy_skills.items():
-            for fn in fns:
-                if fn:
-                    _tid = f'skill:{sk_id}:{fn}'
-                    if _tid not in _assigned:
-                        _assigned.append(_tid)
+    # Fast mode is a session preference. The Codex client revalidates support
+    # against every effective model, so it cannot leak into an incompatible fallback.
+    _session_service_tier = None
+    try:
+        _session_raw = db.get_session_state(session_id, agent_id=agent_id)
+        _session_data = json.loads(_session_raw) if _session_raw else {}
+        if isinstance(_session_data, dict) and _session_data.get('service_tier') == 'priority':
+            _session_service_tier = 'priority'
+    except (TypeError, ValueError):
+        pass
 
     # Helper: build model_config dict from a model DB row
     def _build_model_config(_model: dict) -> dict:
@@ -684,6 +731,7 @@ def run_tool_loop(agent: Dict[str, Any],
             'temperature': _model.get('temperature'),
             'vision_supported': bool(_model.get('vision_supported', False)),
             'api_format': _model.get('api_format', 'openai'),
+            'service_tier': _session_service_tier,
         }
 
     # Resolve agent's default model for LLM calls
@@ -949,11 +997,14 @@ def run_tool_loop(agent: Dict[str, Any],
                 _logger.info("Stop signal received during ATG execution for session %s", session_id)
                 stop_msg = "Agent stopped by user request."
                 _atg_stop_dur = round(time.time() - _loop_start_time, 1)
-                db.add_chat_message(session_id, 'assistant', stop_msg, agent_id=db_agent_id,
-                                    metadata={"timeline": timeline, "stopped": True,
-                                              "thinking_duration": _atg_stop_dur})
+                message_id = _message_id(db.add_chat_message(
+                    session_id, 'assistant', stop_msg, agent_id=db_agent_id,
+                    metadata={"timeline": timeline, "stopped": True,
+                              "thinking_duration": _atg_stop_dur},
+                ))
                 chatlog.append({'type': 'final', 'session_id': session_id, 'content': stop_msg,
-                                'metadata': {'stopped': True, 'thinking_duration': _atg_stop_dur}})
+                                'metadata': {'stopped': True, 'thinking_duration': _atg_stop_dur},
+                                'message_id': message_id})
                 chatlog.append({'type': 'turn_end', 'session_id': session_id,
                                 'thinking_duration': _atg_stop_dur})
                 event_stream.emit('final_answer', {
@@ -1025,7 +1076,8 @@ def run_tool_loop(agent: Dict[str, Any],
                                               atg_enabled=bool(agent_context.get('enable_atg')),
                                               cmp_enabled=bool(agent_context.get('enable_cmp')),
                                               agent_name=agent_context.get('agent_name')
-                                                         or agent_context.get('name'))}
+                                                         or agent_context.get('name'),
+                                              update_tasks_available='update_tasks' in _available_tool_names)}
             state_idx = next(
                 (i for i, m in enumerate(messages)
                  if m.get('role') == 'system' and '## Agent State' in m.get('content', '')),
@@ -1183,10 +1235,14 @@ def run_tool_loop(agent: Dict[str, Any],
             _logger.info("Stop signal received for session %s — aborting loop", session_id)
             stop_msg = "Agent stopped by user request."
             _stop_dur = round(time.time() - _loop_start_time, 1)
-            db.add_chat_message(session_id, 'assistant', stop_msg, agent_id=db_agent_id,
-                                metadata={"timeline": timeline, "stopped": True, "thinking_duration": _stop_dur})
+            message_id = _message_id(db.add_chat_message(
+                session_id, 'assistant', stop_msg, agent_id=db_agent_id,
+                metadata={"timeline": timeline, "stopped": True,
+                          "thinking_duration": _stop_dur},
+            ))
             chatlog.append({'type': 'final', 'session_id': session_id, 'content': stop_msg,
-                            'metadata': {'stopped': True, 'thinking_duration': _stop_dur}})
+                            'metadata': {'stopped': True, 'thinking_duration': _stop_dur},
+                            'message_id': message_id})
             _stop_inj = ("[SYSTEM] Your previous reasoning and response were forcefully "
                          "interrupted by the user via /stop before completion. "
                          "Await the user's next instruction.")
@@ -1931,6 +1987,24 @@ def run_tool_loop(agent: Dict[str, Any],
                     "content": build_corrective_injection(local_links),
                 })
 
+            # Core guard: internal task bookkeeping. When implementation work
+            # happened this turn but the agent never called update_tasks,
+            # remind once and re-enter the loop so it can reconcile before
+            # the final answer is accepted.
+            _ms_reminder = agent_context.get('agent_state')
+            if (_ms_reminder is not None
+                    and not _task_reminder_fired
+                    and not _explicit_task_update_turn
+                    and _successful_mutation
+                    and _ms_reminder.mode == 'execute'
+                    and 'update_tasks' in _available_tool_names
+                    and any(t.get('status') in ('pending', 'in_progress')
+                            for t in _ms_reminder.tasks)
+                    and not stop_event.is_set()):
+                _task_reminder_fired = True
+                pre_final_injections.append(
+                    {"role": "user", "content": _TASK_BOOKKEEPING_REMINDER})
+
             if pre_final_injections:
                 # Save this response as an intermediate assistant message so the
                 # LLM sees it as context, then append the injected instructions.
@@ -1947,8 +2021,12 @@ def run_tool_loop(agent: Dict[str, Any],
 
             # Final response — save with timeline metadata
             ms = agent_context.get('agent_state')
+            # Skip the auto-complete guess when the agent reconciled its task
+            # list in response to the bookkeeping reminder — those statuses
+            # are authoritative.
             if (ms is not None and ms.mode == 'execute' and _successful_mutation
-                    and not stop_event.is_set()):
+                    and not stop_event.is_set()
+                    and not (_task_reminder_fired and _explicit_task_update_turn)):
                 completion = ms.completion_eligible(
                     tool_errors=_tool_errors, final_text=content, mutated=True)
                 if completion['eligible']:
@@ -1983,9 +2061,12 @@ def run_tool_loop(agent: Dict[str, Any],
                     'content': _display_content, 'is_final': True,
                     'send_as_message': True,
                 })
-            db.add_chat_message(session_id, 'assistant', _display_content, agent_id=db_agent_id, metadata=meta)
+            message_id = _message_id(db.add_chat_message(
+                session_id, 'assistant', _display_content,
+                agent_id=db_agent_id, metadata=meta,
+            ))
             chatlog.append({'type': 'final', 'session_id': session_id, 'content': _display_content,
-                            'metadata': _cl_meta})
+                            'metadata': _cl_meta, 'message_id': message_id})
             chatlog.append({'type': 'turn_end', 'session_id': session_id, 'thinking_duration': _final_dur})
             # Archive sub-agent session at turn-end — single-turn only. Explorer &
             # kb-organizer are single-shot, so they archive on completion (no need to
@@ -2116,7 +2197,7 @@ def run_tool_loop(agent: Dict[str, Any],
         for tc_idx, tc in enumerate(tool_calls):
             fn_name = tc['function']['name']
             if fn_name == 'update_tasks':
-                _explicit_task_update = True
+                _explicit_task_update_turn = True
 
             # --- Quality Monitor: hallucinated tool check ---
             _qm_hallucinated = _qm_check_hallucinated(
@@ -2188,7 +2269,7 @@ def run_tool_loop(agent: Dict[str, Any],
                     else:
                         _future = _pool.submit(
                             _execute_tool_core, _fn_p, _args_p,
-                            builtin_exec, real_exec)
+                            builtin_exec, real_exec, agent_context)
                         # Record the deadline at submission, not when collection
                         # reaches this call, so ordering cannot extend its budget.
                         _parallel_jobs[p_idx] = (
@@ -2278,7 +2359,8 @@ def run_tool_loop(agent: Dict[str, Any],
                             'blocked_by': 'tool_guard'}
                 else:
                     tool_result = _execute_tool_core(fn_name, args,
-                                                     builtin_exec, real_exec)
+                                                     builtin_exec, real_exec,
+                                                     agent_context)
 
             # Human-in-the-loop approval for requires_approval safety results
             if isinstance(tool_result, dict) and tool_result.get('level') == 'requires_approval':
@@ -2344,13 +2426,8 @@ def run_tool_loop(agent: Dict[str, Any],
                 })
 
                 # Escalation: ensure a human can see the approval.
-                # We always fan-out to BOTH web SSE AND messaging channels,
-                # because has_web_listener() is unreliable — it only checks
-                # listener registration, not actual SSE delivery. If SSE
-                # disconnects and reconnects, the approval event may already
-                # be gone from the ring buffer. Web SSE delivers the approval
-                # modal in the browser; messaging channels deliver a fallback
-                # notification via Telegram/WhatsApp.
+                # Always fan out to BOTH durable web SSE and messaging channels.
+                # Messaging remains the out-of-browser fallback.
                 # List of (session_id, external_user_id, channel_id) that received
                 # approval_required — used to fan-out approval_resolved to all of them.
                 _escalation_targets: list = []
@@ -2385,31 +2462,8 @@ def run_tool_loop(agent: Dict[str, Any],
                         })
                         _escalation_targets.append((_human_session_id, _web_uid, _web_cid))
 
-                    # Channel (Telegram/WhatsApp): always notify via the super
-                    # agent's messaging channel as a fallback. We no longer gate
-                    # this behind has_web_listener() because the registration
-                    # may exist while the SSE connection is not delivering.
-
-                    # Verify web SSE delivery with heartbeat-aware check.
-                    # has_web_listener() only confirms a callback is registered;
-                    # this confirms the SSE connection is actually sending heartbeats.
-                    _web_sse_active = False
-                    try:
-                        from routes.realtime import has_active_web_sse
-                        _web_sse_active = (
-                            has_active_web_sse(session_id) or
-                            (_human_session_id and has_active_web_sse(_human_session_id))
-                        )
-                    except Exception:
-                        pass  # routes.realtime may not be importable in all contexts
-
-                    if not _web_sse_active:
-                        _logger.info(
-                            "approval %s: web SSE appears inactive for session %s "
-                            "(heartbeat not received within window) — relying on "
-                            "messaging channel fallback",
-                            pending.approval_id, session_id,
-                        )
+                    # Channel (Telegram/WhatsApp) remains an unconditional
+                    # fallback; browser connection liveness is not authoritative.
                     _super = db.get_super_agent()
                     if _super and _super['id'] != agent_id:
                         _su_uid, _su_cid = _resolve_agent_target(_super['id'])
@@ -2812,10 +2866,14 @@ def run_tool_loop(agent: Dict[str, Any],
             _logger.info("Stop signal received for session %s — aborting after tools", session_id)
             stop_msg = "Agent stopped by user request."
             _stopb_dur = round(time.time() - _loop_start_time, 1)
-            db.add_chat_message(session_id, 'assistant', stop_msg, agent_id=db_agent_id,
-                                metadata={"timeline": timeline, "stopped": True, "thinking_duration": _stopb_dur})
+            message_id = _message_id(db.add_chat_message(
+                session_id, 'assistant', stop_msg, agent_id=db_agent_id,
+                metadata={"timeline": timeline, "stopped": True,
+                          "thinking_duration": _stopb_dur},
+            ))
             chatlog.append({'type': 'final', 'session_id': session_id, 'content': stop_msg,
-                            'metadata': {'stopped': True, 'thinking_duration': _stopb_dur}})
+                            'metadata': {'stopped': True, 'thinking_duration': _stopb_dur},
+                            'message_id': message_id})
             _stopb_inj = ("[SYSTEM] Your previous reasoning and response were forcefully "
                           "interrupted by the user via /stop before completion. "
                           "Await the user's next instruction.")

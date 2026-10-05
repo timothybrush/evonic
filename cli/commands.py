@@ -169,20 +169,6 @@ def start_server(port=None, host=None, debug=None, daemon=False):
     # For daemon mode the child process (app.py) will acquire its own lock.
     pid_lock_fd = _acquire_pid_lock()
 
-    # Check if already running (legacy PID check — redundant with flock but kept
-    # for backward compat and a friendlier error message).
-    existing_pid = _get_pid()
-    if existing_pid and _is_running(existing_pid):
-        print(f"Server is already running (PID: {existing_pid})")
-        try:
-            import config
-
-            print(f"Port: {port or config.PORT}")
-        except Exception:
-            pass
-        os.close(pid_lock_fd)
-        return
-
     # Import config to get defaults
     try:
         import config
@@ -408,16 +394,21 @@ def restart_server():
 # ─── Plugin Management ────────────────────────────────────────────────────────
 
 
-def _get_plugin_manager():
-    """Lazily create a PluginManager instance."""
+def _get_plugin_manager(load_plugins: bool = True):
+    """Lazily create a PluginManager instance.
+
+    Metadata-only commands pass load_plugins=False: it skips executing
+    plugin handler modules, whose module-level code can mutate state the
+    live server owns (e.g. the kanban scanner schedules).
+    """
     from backend.plugin_manager import PluginManager
 
-    return PluginManager()
+    return PluginManager(load_plugins=load_plugins)
 
 
 def plugin_list():
     """List all installed plugins in a table format."""
-    pm = _get_plugin_manager()
+    pm = _get_plugin_manager(load_plugins=False)
     plugins = pm.list_plugins()
 
     if not plugins:
@@ -2260,16 +2251,18 @@ def setup_command(non_interactive=False):
         model_name = inp if inp else default_model
 
     # --- Agent name ---
+    from backend.setup import DEFAULT_SUPER_AGENT_NAME
+
     if non_interactive:
-        agent_name = "Siwa Miwa"
+        agent_name = DEFAULT_SUPER_AGENT_NAME
         print(f"  [non-interactive] Using default agent name: {agent_name}")
     else:
         try:
-            agent_name = input("  Your super agent's name (default: Siwa Miwa): ").strip()
+            agent_name = input(f"  Your super agent's name (default: {DEFAULT_SUPER_AGENT_NAME}): ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n  Setup aborted.")
             return
-        agent_name = agent_name if agent_name else "Siwa Miwa"
+        agent_name = agent_name or DEFAULT_SUPER_AGENT_NAME
 
     # --- Language ---
     if non_interactive:
@@ -3720,6 +3713,9 @@ def doctor_command(quick=False, fix=False, with_llm_provider=False, verbose=Fals
         "public_history": "0",
         "long_running_guard_enabled": (
             "1" if getattr(_cfg, "LONG_RUNNING_GUARD_ENABLED", True) else "0"
+        ),
+        "root_fs_scan_guard_enabled": (
+            "1" if getattr(_cfg, "ROOT_FS_SCAN_GUARD_ENABLED", True) else "0"
         ),
         "message_wrapper_enabled": "1",
         "events_dispatch_enabled": "1",
