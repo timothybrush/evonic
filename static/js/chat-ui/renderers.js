@@ -103,64 +103,15 @@ function normalizeTimestamp(timestamp) {
 
 // -- KaTeX math rendering ----------------------------------------------------------
 
-// Renders LaTeX math delimiters ($...$ and $$...$$) in HTML content.
-// Runs after marked.parse() and sanitize(), before DOM insertion.
-// Protects code blocks (<pre><code>) from accidental math rendering.
+// Renders LaTeX math delimiters in HTML content. Runs after marked.parse() and
+// before DOM insertion. The currency-safe rules live in js/markdown-math.js
+// (EvMarkdownMath.render) so chat, KB previews and template scripts share one
+// implementation; without that script math is simply left untouched.
 function renderMath(html) {
-    if (typeof katex === 'undefined') return html;
-    try {
-        return _renderMathImpl(html);
-    } catch (e) {
-        // Never let math rendering break the message pipeline
-        return html;
-    }
-}
-
-function _renderMathImpl(html) {
-
-    const codeBlocks = [];
-    // Protect <pre><code> blocks
-    let safe = (html || '').replace(
-        /<pre\b[^>]*>[\s\S]*?<\/pre>/gi,
-        function (match) {
-            codeBlocks.push(match);
-            return '\u0000CODE' + (codeBlocks.length - 1) + '\u0000';
-        }
-    );
-
-    // Protect inline <code> blocks
-    safe = safe.replace(
-        /<code\b[^>]*>[\s\S]*?<\/code>/gi,
-        function (match) {
-            codeBlocks.push(match);
-            return '\u0000CODE' + (codeBlocks.length - 1) + '\u0000';
-        }
-    );
-
-    // Render display math $$...$$ first
-    safe = safe.replace(/\$\$([\s\S]*?)\$\$/g, function (match, formula) {
-        try {
-            return katex.renderToString(formula, { displayMode: true, throwOnError: false });
-        } catch (e) {
-            return match;
-        }
-    });
-
-    // Render inline math $...$ (must not be preceded or followed by $)
-    safe = safe.replace(/(?<!\$)\$(?!\$)([\s\S]*?)(?<!\$)\$(?!\$)/g, function (match, formula) {
-        try {
-            return katex.renderToString(formula, { displayMode: false, throwOnError: false });
-        } catch (e) {
-            return match;
-        }
-    });
-
-    // Restore code blocks
-    safe = safe.replace(/\u0000CODE(\d+)\u0000/g, function (match, idx) {
-        return codeBlocks[parseInt(idx, 10)] || match;
-    });
-
-    return safe;
+    if (!html) return html || '';
+    const math = typeof window !== 'undefined' ? window.EvMarkdownMath : null;
+    if (math && typeof math.render === 'function') return math.render(html);
+    return html;
 }
 
 function truncateLine(text, max) {
@@ -1181,7 +1132,31 @@ function _addCopyButtons($bubble) {
     });
 }
 
+// Divider for a workplace switch note. The note's text is for the agent; the
+// user gets a compact "from → to" marker built from its metadata.
+function buildWorkplaceSwitchMarker(sw, opts, cfg) {
+    const name = side => (side && side.name) ? side.name : 'local workspace';
+    const $label = $('<span class="chat-wp-switch-label">')
+        .append(uiIcon('server', 12), ' Workplace switched: ')
+        .append($('<b>').text(name(sw.from)), ' → ', $('<b>').text(name(sw.to)));
+    const date = opts.timestamp != null ? normalizeTimestamp(opts.timestamp) : null;
+    if (date) {
+        let label = '';
+        try {
+            label = cfg.formatTimestamp ? cfg.formatTimestamp(date)
+                : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        } catch (e) {}
+        // Not <time>: '#chat-messages time' styles bubble timestamps as blocks
+        if (label) $label.append($('<span class="chat-wp-switch-time">').attr('title', date.toLocaleString()).text(' · ' + label));
+    }
+    return $('<div class="chat-wp-switch" role="note" data-msg-role="system">')
+        .append('<span class="chat-wp-switch-line"></span>', $label, '<span class="chat-wp-switch-line"></span>');
+}
+
 export function buildMessageBubble(role, content, opts = {}, cfg = {}) {
+    if (opts.metadata && opts.metadata.workplace_switch) {
+        return buildWorkplaceSwitchMarker(opts.metadata.workplace_switch, opts, cfg);
+    }
     const {
         userAlign = 'right',
         assistantAlign = 'left',

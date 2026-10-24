@@ -787,6 +787,9 @@ class AgentRuntime:
         self._session_skill_mds: Dict[str, Dict[str, str]] = {}    # session_id -> {skill_id: system_md}
         self._session_skill_tools: Dict[str, Dict[str, list]] = {}  # session_id -> {skill_id: [tool_defs]}
         self._prefetcher = TurnPrefetcher()  # pre-loads messages for next turn
+        # session_id -> notes held until that session's running turn ends.
+        # Guarded by _session_store._busy_guard (see add_session_note).
+        self._pending_session_notes: Dict[str, list] = {}
         # Schedule periodic cleanup of stale buffer timers
         self._buffer_timer_stats = {"created": 0, "cancelled": 0, "leaked": 0}
         if background_enabled:
@@ -933,6 +936,47 @@ class AgentRuntime:
     def _is_busy(self, session_id: str) -> bool:
         with self._session_store._busy_guard:
             return self._session_store._busy.get(session_id, False)
+
+    def add_session_note(self, agent_id: str, session_id: str, content: str,
+                         metadata: Dict[str, Any], external_user_id: str = '') -> None:
+        """Append a ``[SYSTEM]`` note to a session (LLM context + chat UI).
+
+        A running turn keeps the context and workplace it started with, so a
+        note arriving mid-turn is held and written when that turn ends —
+        otherwise its later tool results would land after the note.
+        """
+        note = (agent_id, content, metadata, external_user_id)
+        if self._is_busy(session_id) and self._has_live_turn(agent_id, session_id):
+            with self._session_store._busy_guard:
+                # Re-check under the guard: the turn's finally clears busy under
+                # it before flushing, so a note queued here is never stranded.
+                if self._session_store._busy.get(session_id, False):
+                    self._pending_session_notes.setdefault(session_id, []).append(note)
+                    return
+        self._write_session_note(session_id, *note)
+
+    def _flush_session_notes(self, session_id: str) -> None:
+        with self._session_store._busy_guard:
+            notes = self._pending_session_notes.pop(session_id, [])
+        for note in notes:
+            self._write_session_note(session_id, *note)
+
+    def _write_session_note(self, session_id: str, agent_id: str, content: str,
+                            metadata: Dict[str, Any], external_user_id: str) -> None:
+        # Same shape as the /stop injection: a user-role DB row plus a chatlog
+        # 'system' entry, which the LLM history replays as a user message.
+        message_id = db.add_chat_message(session_id, 'user', content,
+                                         agent_id=agent_id, metadata=metadata)
+        chatlog_manager.get(agent_id, session_id).append({
+            'type': 'system', 'session_id': session_id, 'content': content,
+            'metadata': metadata, 'message_id': message_id,
+        })
+        self._prefetcher.invalidate(session_id)
+        event_stream.emit('message_received', {
+            'agent_id': agent_id, 'session_id': session_id,
+            'external_user_id': external_user_id, 'message': content,
+            'message_id': message_id, 'metadata': metadata, 'role': 'system',
+        })
 
     def _has_live_turn(self, agent_id: str, session_id: str) -> bool:
         """True when the durable store still holds a running turn for the session.
@@ -1742,6 +1786,14 @@ class AgentRuntime:
             else:
                 model = db.get_agent_model(db_agent_id)
             model_id = model.get('id') if model else None
+            # A per-session model override gates on its own model's concurrency.
+            try:
+                _ss = json.loads(db.get_session_state(ctx.session_id, agent_id=db_agent_id) or '{}')
+                _ov = _ss.get('model_override_id') if isinstance(_ss, dict) else None
+                if _ov and db.get_model_by_id(_ov):
+                    model_id = _ov
+            except Exception:
+                pass
         except Exception as e:
             _logger.warning("Failed to resolve turn model for agent %s, proceeding without model gating: %s", agent_id, e)
             model_id = None
@@ -1828,6 +1880,10 @@ class AgentRuntime:
             return result
         finally:
             self._set_busy(ctx.session_id, False)
+            try:
+                self._flush_session_notes(ctx.session_id)
+            except Exception:
+                _logger.warning("Failed to write held session notes for %s", ctx.session_id, exc_info=True)
             realtime_store.finish_turn(ctx.turn_id)
             remaining = realtime_store.busy_agents().get(agent_id)
             event_stream.emit('agent_busy_changed', {
@@ -2416,6 +2472,7 @@ class AgentRuntime:
                 'messaging_acl_mode': agent.get('messaging_acl_mode', 'whitelist'),
                 'enable_atg': bool(agent.get('enable_atg')) and bool(agent.get('enable_agent_state')),
                 'enable_cmp': bool(agent.get('enable_cmp')) and bool(agent.get('enable_agent_state')),
+                'workplace_switch_enabled': bool(agent.get('workplace_switch_enabled')),
             }
         _last_user = chatlog.get_last_entry(types=frozenset({'user'}))
         assigned_tool_ids, tools = _apply_restart_origin_guard(

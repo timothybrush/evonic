@@ -77,6 +77,16 @@ html.dark {
 .prose a { color: #4f46e5; text-decoration: underline; }
 .prose hr { border: none; border-top: 1px solid #d1d5db; margin: 0.75em 0; }
 
+.chat-wp-switch { display: flex; align-items: center; gap: .75rem; margin: .25rem 0; color: #6b7280; font-size: .75rem; }
+.chat-wp-switch-line { flex: 1 1 0; height: 1px; background: rgb(148 163 184 / .35); }
+.chat-wp-switch-label { flex: 0 1 auto; min-width: 0; max-width: 80%; padding: .1875rem .625rem; border: 1px solid rgb(148 163 184 / .35); border-radius: 9999px;
+    background: rgb(148 163 184 / .08); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-wp-switch-label .ui-ic { vertical-align: -2px; }
+.chat-wp-switch-label b { font-weight: 600; color: #374151; }
+.chat-wp-switch-time { color: #9ca3af; }
+html.dark .chat-wp-switch { color: #9ca3af; }
+html.dark .chat-wp-switch-label b { color: #e5e7eb; }
+html.dark .chat-wp-switch-time { color: #6b7280; }
 .chat-prose { line-height: 1.5; }
 .chat-prose p { margin: 0.25em 0; }
 .chat-prose p:first-child { margin-top: 0; }
@@ -1537,6 +1547,25 @@ html.dark .ev-banner-warn { background: rgb(245 158 11 / .1); border-color: rgb(
 html.dark .ev-banner-info { background: rgb(99 102 241 / .12); border-color: rgb(129 140 248 / .32); color: #c7d2fe; }
 html.dark .ev-banner-ok { background: rgb(34 197 94 / .1); border-color: rgb(34 197 94 / .3); color: #86efac; }
 html.dark .ev-banner-danger { background: rgb(239 68 68 / .1); border-color: rgb(239 68 68 / .32); color: #fca5a5; }
+
+header .ev-banner { --bn: 99 102 241; background: var(--bg-header); border-width: 1px 0 0; border-style: solid; border-color: rgb(148 163 184 / .16); }
+header .ev-banner.ev-banner-info { --bn: 99 102 241; background: var(--bg-header); border-color: rgb(148 163 184 / .16); color: #3730a3; }
+header .ev-banner.ev-banner-warn { --bn: 245 158 11; background: var(--bg-header); border-color: rgb(148 163 184 / .16); color: #92400e; }
+header .ev-banner.ev-banner-ok { --bn: 34 197 94; background: var(--bg-header); border-color: rgb(148 163 184 / .16); color: #166534; }
+header .ev-banner.ev-banner-danger { --bn: 239 68 68; background: var(--bg-header); border-color: rgb(148 163 184 / .16); color: #991b1b; }
+html.dark header .ev-banner.ev-banner-info { background: var(--bg-header); border-color: rgb(148 163 184 / .14); color: #c7d2fe; }
+html.dark header .ev-banner.ev-banner-warn { background: var(--bg-header); border-color: rgb(148 163 184 / .14); color: #fcd34d; }
+html.dark header .ev-banner.ev-banner-ok { background: var(--bg-header); border-color: rgb(148 163 184 / .14); color: #86efac; }
+html.dark header .ev-banner.ev-banner-danger { background: var(--bg-header); border-color: rgb(148 163 184 / .14); color: #fca5a5; }
+header #ev-update-banner > div { padding-left: 1rem; padding-right: 1rem; }
+header #ev-update-banner-actions { gap: .375rem; }
+header #ev-update-banner-actions > a, header #ev-update-banner-actions > button:not([aria-label="Dismiss"]) {
+    margin-left: 0 !important; padding: .25rem .75rem; border: 0; border-radius: 9999px; background: rgb(var(--bn) / .16); color: inherit;
+    font-size: .8125rem; font-weight: 600; line-height: 1.25rem; text-decoration: none !important; cursor: pointer; transition: background-color .15s;
+}
+header #ev-update-banner-actions > a:hover, header #ev-update-banner-actions > button:not([aria-label="Dismiss"]):hover { background: rgb(var(--bn) / .3); }
+header #ev-update-banner-actions > button[aria-label="Dismiss"] { margin-left: .375rem !important; width: 1.75rem; height: 1.75rem; display: inline-flex; align-items: center; justify-content: center; border-radius: .5rem; opacity: .7; }
+header #ev-update-banner-actions > button[aria-label="Dismiss"]:hover { opacity: 1; background: rgb(var(--bn) / .16); }
 
 html.dark .bg-amber-50.border-amber-200 :is([class*="text-gray-"], strong, b, a),
 html.dark .bg-blue-50.border-blue-200 :is([class*="text-gray-"], strong, b, a),

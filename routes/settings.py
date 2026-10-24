@@ -329,6 +329,7 @@ def api_list_tools():
             'enable_atg': bool(agent.get('enable_atg')) and bool(agent.get('enable_agent_state')),
             'enable_cmp': bool(agent.get('enable_cmp')) and bool(agent.get('enable_agent_state')),
             'always_execute': bool(agent.get('always_execute')),
+            'workplace_switch_enabled': bool(agent.get('workplace_switch_enabled')),
         }
 
     # Built-ins are filtered by the selected agent's feature settings when supplied.
@@ -616,6 +617,35 @@ def api_two_pass_enabled():
         return jsonify({'success': True, 'enabled': enabled == '1'})
     val = db.get_setting('two_pass_enabled', default)
     return jsonify({'enabled': val == '1'})
+
+
+@settings_bp.route('/api/settings/two-factor-auth', methods=['GET', 'PUT'])
+def api_two_factor_auth():
+    """Get or update TOTP enforcement, respecting the environment override."""
+    from backend import totp
+
+    effective, overridden = totp.get_enabled_state()
+    configured = totp.is_configured()
+    stored = db.get_setting('two_factor_auth_enabled', '0') == '1'
+    if request.method == 'PUT':
+        data = request.get_json() or {}
+        try:
+            enabled = _coerce_boolean(data.get('enabled'))
+        except ValueError:
+            return jsonify({'success': False, 'error': 'enabled must be a boolean'}), 400
+        old_val = db.get_setting('two_factor_auth_enabled', '0')
+        new_val = '1' if enabled else '0'
+        db.set_setting('two_factor_auth_enabled', new_val)
+        _audit_setting_change('two_factor_auth_enabled', old_val, new_val)
+        stored = enabled
+        effective, overridden = totp.get_enabled_state()
+    return jsonify({
+        'success': True,
+        'enabled': effective,
+        'stored_enabled': stored,
+        'env_override': overridden,
+        'configured': configured,
+    })
 
 
 @settings_bp.route('/api/settings/public-history', methods=['GET', 'PUT'])

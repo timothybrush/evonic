@@ -685,8 +685,11 @@ def build_system_prompt(agent: Dict[str, Any], injected_system_vars: Dict[str, s
                        f"{now.strftime('%Y-%m-%d')}, {now.strftime('%H:%M:%S')} (WIB/UTC+7)")
 
     # Run-as-user awareness: tell agent which user they execute as (no sudo needed).
+    # Only the local backend honours run_as_user; an agent with a workplace runs
+    # through that workplace's backend (for an Evonet tunnel: the user running
+    # the Evonet process on the target host), so claiming it would be a lie.
     run_as_user = agent.get('run_as_user')
-    if run_as_user and not agent.get('sandbox_enabled'):
+    if run_as_user and not agent.get('sandbox_enabled') and not agent.get('workplace_id'):
         prompt += f"\n\nYou are run as the **{run_as_user}** user."
 
     # Bwrap sandbox awareness: agents executing inside a bubblewrap sandbox
@@ -905,6 +908,7 @@ def build_tools(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
         'id': agent['id'],
         'is_super': bool(agent.get('is_super')),
         'workplace_id': agent.get('workplace_id'),
+        'workplace_switch_enabled': bool(agent.get('workplace_switch_enabled')),
         'send_file_allowed_path_regex': agent.get('send_file_allowed_path_regex', ''),
         'enable_atg': bool(agent.get('enable_atg')) and bool(agent.get('enable_agent_state')),
         'enable_cmp': bool(agent.get('enable_cmp')) and bool(agent.get('enable_agent_state')),

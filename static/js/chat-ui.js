@@ -588,6 +588,150 @@ function retrofitImageForLazy($img, $scrollContainer) {
     setupImageForLazy($img, $scrollContainer || _findScrollContainer($img));
 }
 
+// ── icons.js ────────────────────────────────────────────────────
+
+const _UI_ICONS = {
+    'brain': '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/><path d="M3.477 10.896a4 4 0 0 1 .585-.396"/><path d="M19.938 10.5a4 4 0 0 1 .585.396"/><path d="M6 18a4 4 0 0 1-1.967-.516"/><path d="M19.967 17.484A4 4 0 0 1 18 18"/>',
+    'wrench': '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+    'message': '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+    'retry': '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+    'check': '<path d="M20 6 9 17l-5-5"/>',
+    'x': '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+    'check-circle': '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
+    'x-circle': '<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>',
+    'lock': '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+    'alert': '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+    'chevron-right': '<path d="m9 18 6-6-6-6"/>',
+    'chevron-down': '<path d="m6 9 6 6 6-6"/>',
+    'server': '<rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01M6 18h.01"/>',
+};
+
+function uiIcon(name, size) {
+    const s = size || 14;
+    return '<svg class="ui-ic" width="' + s + '" height="' + s + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+        'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (_UI_ICONS[name] || '') + '</svg>';
+}
+
+// ── badges.js ───────────────────────────────────────────────────
+
+const TONE_CLASS = {
+    green: 'text-green-700 border-green-300 bg-green-50 dark:text-green-300 dark:border-green-800 dark:bg-green-950/40',
+    red: 'text-red-700 border-red-300 bg-red-50 dark:text-red-300 dark:border-red-800 dark:bg-red-950/40',
+    amber: 'text-orange-700 border-orange-300 bg-orange-50 dark:text-orange-300 dark:border-orange-800 dark:bg-orange-950/40',
+    neutral: 'text-gray-600 border-gray-300 bg-gray-50 dark:text-gray-300 dark:border-gray-700 dark:bg-gray-800/60',
+};
+
+const TONE_ICON = { green: 'check', red: 'x', amber: 'alert', neutral: 'lock' };
+
+const SOURCE_LABEL = { dmss: 'DMSS', rules: 'Rules', guard: 'Guard' };
+
+function _decidedByLabel(approval) {
+    const by = String(approval.decided_by || '');
+    if (by.indexOf('agent:') === 0) return 'agent ' + by.slice(6);
+    if (by === 'timeout') return 'Timeout';
+    if (by === 'system:stopped') return 'Stopped';
+    if (by === 'policy:api') return 'API policy';
+    if (by.indexOf('user:') === 0) return 'You';
+    return 'You';
+}
+
+function approvalLabel(approval) {
+    if (!approval || !approval.decision) return null;
+    const by = String(approval.decided_by || '');
+    const who = _decidedByLabel(approval);
+    if (approval.decision === 'approve') {
+        if (by === 'timeout') return 'Timed out';
+        return who === 'You' ? 'You approved' : 'Approved by ' + who;
+    }
+    if (by === 'timeout') return 'Timed out — rejected';
+    if (by === 'policy:api') return 'Rejected (API policy)';
+    if (by === 'system:stopped') return 'Stopped — rejected';
+    return who === 'You' ? 'You declined' : 'Declined by ' + who;
+}
+
+function _safetyLabel(safety) {
+    const source = SOURCE_LABEL[safety.source] || 'Rules';
+    const decision = safety.decision || safety.level || 'allow';
+    const word = decision === 'block' ? 'block'
+        : decision === 'review' ? 'review'
+        : 'allow';
+    return source + ' ' + word;
+}
+
+function _toneFor(decision, source) {
+    if (decision === 'block') return 'red';
+    if (decision === 'review') return 'amber';
+    // Only a model-backed verdict earns a positive tone; a plain rule pass is neutral.
+    return source === 'dmss' ? 'green' : 'neutral';
+}
+
+function _safetyTooltip(safety) {
+    const parts = [];
+    parts.push((SOURCE_LABEL[safety.source] || 'Rules') + ' verdict');
+    if (safety.mode) parts.push('mode ' + safety.mode);
+    if (safety.model_decision) parts.push('model ' + safety.model_decision);
+    if (safety.confidence != null) parts.push('confidence ' + safety.confidence);
+    if (safety.event_id) parts.push('event ' + String(safety.event_id).slice(0, 12));
+    if (safety.blocked_patterns && safety.blocked_patterns.length) {
+        parts.push('flagged: ' + safety.blocked_patterns.join(', '));
+    }
+    if (safety.reasons && safety.reasons.length) {
+        parts.push(safety.reasons[0]);
+    }
+    return parts.join(' · ');
+}
+
+function describeBadge(safety, approval) {
+    if (approval && approval.decision) {
+        const label = approvalLabel(approval);
+        const tone = approval.decision === 'approve' ? 'green' : 'red';
+        const title = 'Decision: ' + label +
+            (approval.decided_by ? ' (' + approval.decided_by + ')' : '') +
+            (safety ? ' · ' + _safetyTooltip(safety) : '');
+        return { label: label, tone: tone, title: title, icon: TONE_ICON[tone] };
+    }
+    if (!safety || !safety.source) return null;
+    const decision = safety.decision || 'allow';
+    // A plain rule pass with no model involvement is the boring default: no
+    // badge, so the timeline stays quiet unless something actually decided.
+    const hasModelContext = !!(safety.mode && safety.mode !== null) ||
+        (safety.blocked_patterns && safety.blocked_patterns.length > 0);
+    if (decision === 'allow' && safety.source !== 'dmss' && !hasModelContext) return null;
+    const tone = _toneFor(decision, safety.source);
+    return {
+        label: _safetyLabel(safety),
+        tone: tone,
+        title: _safetyTooltip(safety),
+        icon: tone === 'neutral' && decision === 'allow' ? 'check' : TONE_ICON[tone],
+    };
+}
+
+function buildBadge(safety, approval) {
+    const desc = describeBadge(safety, approval);
+    if (!desc) return null;
+    const toneClass = TONE_CLASS[desc.tone] || TONE_CLASS.neutral;
+    const $label = $('<span>').text(desc.label);
+    return $('<span class="safety-badge inline-flex items-center gap-1 ml-auto pl-2 text-[10px] font-semibold px-1.5 py-0.5 rounded border whitespace-nowrap">')
+        .addClass(toneClass)
+        .attr('title', desc.title)
+        .attr('data-safety-tone', desc.tone)
+        .append(uiIcon(desc.icon, 11), $label);
+}
+
+function applyBadge($entry, safety, approval) {
+    if (!$entry || !$entry.length) return;
+    const $badge = buildBadge(safety, approval);
+    if (!$badge) return;
+    const key = $badge.attr('title') + '|' + $badge.text();
+    if ($entry.find('.safety-badge').attr('data-safety-key') === key) return;
+    $entry.find('.safety-badge').remove();
+    $badge.attr('data-safety-key', key);
+    const $status = $entry.find('.tl-status').first().parent();
+    const $header = ($status && $status.length) ? $status : $entry.children().first();
+    if ($header && $header.length) $header.append($badge);
+    else $entry.append($badge);
+}
+
 // ── renderers.js ────────────────────────────────────────────────
 
 // ── Sanitizer ─────────────────────────────────────────────────────────────────
@@ -621,16 +765,29 @@ function _walkSanitize(node) {
             const allowed = (ALLOWED_ATTRS[tag] || []).concat(ALLOWED_ATTRS['*'] || []);
             const attrsToRemove = [...child.attributes].filter(a => !allowed.includes(a.name));
             attrsToRemove.forEach(a => child.removeAttribute(a.name));
-            // Sanitize hrefs
+            // Sanitize hrefs / image sources: only web URLs, mailto:, anchors,
+            // and same-origin /api/ paths are user-accessible. Local filesystem
+            // paths and custom URI schemes (file:, sandbox:, ...) render as
+            // broken links in the browser, so they are neutralized here.
             if (tag === 'a') {
                 const href = child.getAttribute('href') || '';
-                if (/^javascript:/i.test(href) || /^data:/i.test(href)) {
+                if (!/^(https?:\/\/|mailto:|#|\/api\/)/i.test(href)) {
                     child.setAttribute('href', '#');
+                    child.setAttribute('title', 'Local path — not accessible via link');
                 }
                 child.setAttribute('rel', 'noopener noreferrer');
                 // Open external links in a new tab
                 if (/^https?:\/\//i.test(href)) {
                     child.setAttribute('target', '_blank');
+                }
+            }
+            if (tag === 'img') {
+                const src = child.getAttribute('src') || '';
+                if (!/^(https?:\/\/|\/api\/|data:image\/)/i.test(src)) {
+                    // Neutralize unsafe image sources (local paths, file:/sandbox:)
+                    child.removeAttribute('src');
+                    const alt = child.getAttribute('alt') || '';
+                    child.setAttribute('alt', alt ? alt + ' (unavailable)' : '(unavailable)');
                 }
             }
             _walkSanitize(child);
@@ -669,64 +826,15 @@ function normalizeTimestamp(timestamp) {
 
 // -- KaTeX math rendering ----------------------------------------------------------
 
-// Renders LaTeX math delimiters ($...$ and $$...$$) in HTML content.
-// Runs after marked.parse() and sanitize(), before DOM insertion.
-// Protects code blocks (<pre><code>) from accidental math rendering.
+// Renders LaTeX math delimiters in HTML content. Runs after marked.parse() and
+// before DOM insertion. The currency-safe rules live in js/markdown-math.js
+// (EvMarkdownMath.render) so chat, KB previews and template scripts share one
+// implementation; without that script math is simply left untouched.
 function renderMath(html) {
-    if (typeof katex === 'undefined') return html;
-    try {
-        return _renderMathImpl(html);
-    } catch (e) {
-        // Never let math rendering break the message pipeline
-        return html;
-    }
-}
-
-function _renderMathImpl(html) {
-
-    const codeBlocks = [];
-    // Protect <pre><code> blocks
-    let safe = (html || '').replace(
-        /<pre\b[^>]*>[\s\S]*?<\/pre>/gi,
-        function (match) {
-            codeBlocks.push(match);
-            return '\u0000CODE' + (codeBlocks.length - 1) + '\u0000';
-        }
-    );
-
-    // Protect inline <code> blocks
-    safe = safe.replace(
-        /<code\b[^>]*>[\s\S]*?<\/code>/gi,
-        function (match) {
-            codeBlocks.push(match);
-            return '\u0000CODE' + (codeBlocks.length - 1) + '\u0000';
-        }
-    );
-
-    // Render display math $$...$$ first
-    safe = safe.replace(/\$\$([\s\S]*?)\$\$/g, function (match, formula) {
-        try {
-            return katex.renderToString(formula, { displayMode: true, throwOnError: false });
-        } catch (e) {
-            return match;
-        }
-    });
-
-    // Render inline math $...$ (must not be preceded or followed by $)
-    safe = safe.replace(/(?<!\$)\$(?!\$)([\s\S]*?)(?<!\$)\$(?!\$)/g, function (match, formula) {
-        try {
-            return katex.renderToString(formula, { displayMode: false, throwOnError: false });
-        } catch (e) {
-            return match;
-        }
-    });
-
-    // Restore code blocks
-    safe = safe.replace(/\u0000CODE(\d+)\u0000/g, function (match, idx) {
-        return codeBlocks[parseInt(idx, 10)] || match;
-    });
-
-    return safe;
+    if (!html) return html || '';
+    const math = typeof window !== 'undefined' ? window.EvMarkdownMath : null;
+    if (math && typeof math.render === 'function') return math.render(html);
+    return html;
 }
 
 function truncateLine(text, max) {
@@ -1282,8 +1390,12 @@ function _renderRecallGraphResult(result) {
 function buildToolResultDetail(ev) {
     if (ev.error) {
         let msg = typeof ev.error === 'string' && ev.error.length > 1 ? ev.error : null;
+        if (!msg && typeof ev.error === 'object') msg = _extractToolError({ error: ev.error });
         if (!msg && typeof ev.result === 'string') msg = ev.result;
-        if (!msg && ev.result && typeof ev.result === 'object') msg = ev.result.error || ev.result.message || null;
+        if (!msg && ev.result && typeof ev.result === 'object') {
+            msg = _extractToolError(ev.result)
+                || (typeof ev.result.message === 'string' ? ev.result.message : null);
+        }
         if (!msg) msg = 'Tool error';
         return $('<div class="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1 font-mono whitespace-pre-wrap">').text(msg);
     }
@@ -1439,28 +1551,6 @@ function _buildThinkingContent(content) {
     $fade.append($btn);
     $pre.append($fade);
     return $pre;
-}
-
-// ── Icons (inline SVG; replaces emoji in the timeline / status / approval UI) ──
-const _UI_ICONS = {
-    'brain': '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/><path d="M3.477 10.896a4 4 0 0 1 .585-.396"/><path d="M19.938 10.5a4 4 0 0 1 .585.396"/><path d="M6 18a4 4 0 0 1-1.967-.516"/><path d="M19.967 17.484A4 4 0 0 1 18 18"/>',
-    'wrench': '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
-    'message': '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
-    'retry': '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
-    'check': '<path d="M20 6 9 17l-5-5"/>',
-    'x': '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
-    'check-circle': '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
-    'x-circle': '<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>',
-    'lock': '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
-    'alert': '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
-    'chevron-right': '<path d="m9 18 6-6-6-6"/>',
-    'chevron-down': '<path d="m6 9 6 6 6-6"/>',
-};
-
-function uiIcon(name, size) {
-    const s = size || 14;
-    return '<svg class="ui-ic" width="' + s + '" height="' + s + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
-        'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (_UI_ICONS[name] || '') + '</svg>';
 }
 
 // ── Timeline entry builder ────────────────────────────────────────────────────
@@ -1750,7 +1840,31 @@ function _addCopyButtons($bubble) {
     });
 }
 
+// Divider for a workplace switch note. The note's text is for the agent; the
+// user gets a compact "from → to" marker built from its metadata.
+function buildWorkplaceSwitchMarker(sw, opts, cfg) {
+    const name = side => (side && side.name) ? side.name : 'local workspace';
+    const $label = $('<span class="chat-wp-switch-label">')
+        .append(uiIcon('server', 12), ' Workplace switched: ')
+        .append($('<b>').text(name(sw.from)), ' → ', $('<b>').text(name(sw.to)));
+    const date = opts.timestamp != null ? normalizeTimestamp(opts.timestamp) : null;
+    if (date) {
+        let label = '';
+        try {
+            label = cfg.formatTimestamp ? cfg.formatTimestamp(date)
+                : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        } catch (e) {}
+        // Not <time>: '#chat-messages time' styles bubble timestamps as blocks
+        if (label) $label.append($('<span class="chat-wp-switch-time">').attr('title', date.toLocaleString()).text(' · ' + label));
+    }
+    return $('<div class="chat-wp-switch" role="note" data-msg-role="system">')
+        .append('<span class="chat-wp-switch-line"></span>', $label, '<span class="chat-wp-switch-line"></span>');
+}
+
 function buildMessageBubble(role, content, opts = {}, cfg = {}) {
+    if (opts.metadata && opts.metadata.workplace_switch) {
+        return buildWorkplaceSwitchMarker(opts.metadata.workplace_switch, opts, cfg);
+    }
     const {
         userAlign = 'right',
         assistantAlign = 'left',
@@ -1836,14 +1950,8 @@ function buildMessageBubble(role, content, opts = {}, cfg = {}) {
         for (let slot = 1; slot <= imageUrls.length; slot++) {
             if (!referenced.has(slot)) addImage(slot);
         }
-        // Render non-image files. Stored attachments get the previewable card
-        // (view/download); optimistic entries built before the upload lands have
-        // no attachment_id yet, so they keep the plain badge.
+        // Render non-image file badges
         attachmentInfos.filter(info => info && !info.is_image).forEach(info => {
-            if (info.attachment_id != null) {
-                $bubble.prepend($('<div class="mb-2">').append(buildAttachmentCard(info)));
-                return;
-            }
             const $badge = $('<div class="flex items-center gap-1.5 mb-1 px-2 py-1 bg-white/20 rounded text-xs">')
                 .append($('<svg class="w-3.5 h-3.5 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path d="M3 3.5A1.5 1.5 0 0 1 4.5 2h6.879a1.5 1.5 0 0 1 1.06.44l4.122 4.12A1.5 1.5 0 0 1 17 7.622V16.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 3 16.5v-13Z"/></svg>'))
                 .append($('<span class="truncate">').text(info.filename));
@@ -2629,7 +2737,9 @@ class PollingAdapter {
         if (entry.type === 'tool_output') {
             let result;
             try { result = JSON.parse(entry.content); } catch (e) { result = { data: entry.content }; }
-            return { event: 'tool_executed', data: { tool: entry.function, result, error: !!entry.error }, seq: 0 };
+            return { event: 'tool_executed', data: { tool: entry.function, result, error: !!entry.error,
+                                                      safety: entry.safety || null,
+                                                      approval: entry.approval || null }, seq: 0 };
         }
         if (entry.type === 'intermediate') {
             return { event: 'response_chunk', data: { content: entry.content, is_final: false }, seq: 0 };
@@ -2936,6 +3046,10 @@ class Turn {
             if (this._captureSavedArtifact(data)) this._renderSavedArtifacts();
             this._mergeToolResult(data);
             this._showThinkingRow();
+            // An agent that moved itself changed the workplace shown in the page header.
+            if (data && data.tool === 'switch_workplace' && !data.error) {
+                document.dispatchEvent(new CustomEvent('evonic:workplace-maybe-changed'));
+            }
             // Fire tool:executed for agent-state-bridge
             this._onTrigger('tool:executed', data);
             return;
@@ -3075,6 +3189,10 @@ class Turn {
                 ? '<span class="inline-flex" style="color:#ef4444">' + uiIcon('x', 14) + '</span>'
                 : '<span class="inline-flex" style="color:#22c55e">' + uiIcon('check', 14) + '</span>');
         }
+
+        // Who decided this execution: DMSS, the rule engine, you, another agent,
+        // or a timeout.  Persisted with the tool output, so replay keeps it.
+        this._applySafetyBadge($target, data.safety, data.approval);
 
         const $detail = $target.find('.tl-detail');
         if ($detail.length) {
@@ -3258,6 +3376,23 @@ class Turn {
             $('<div class="text-xs text-gray-600 dark:text-gray-300 mb-2">').text(description)
         );
 
+        // What triggered the gate: engine verdict + flagged categories, so the
+        // decision can be evaluated after the fact.
+        if (data.safety && data.safety.source) {
+            const prov = describeBadge(data.safety, null);
+            const bits = [];
+            if (prov) bits.push('Verdict: ' + prov.label);
+            if (data.safety.mode) bits.push('mode ' + data.safety.mode);
+            if (data.safety.confidence != null) bits.push('confidence ' + data.safety.confidence);
+            if (data.safety.event_id) bits.push('event ' + String(data.safety.event_id).slice(0, 12));
+            $details.append($('<div class="text-[11px] text-gray-500 dark:text-gray-400 mb-1">')
+                .attr('title', prov ? prov.title : '').text(bits.join(' · ')));
+            if (data.safety.blocked_patterns && data.safety.blocked_patterns.length) {
+                $details.append($('<div class="text-[11px] text-gray-500 dark:text-gray-400 mb-2">')
+                    .text('Flagged: ' + data.safety.blocked_patterns.join(', ')));
+            }
+        }
+
         if (reasons.length) {
             const $ul = $('<ul class="text-xs text-gray-600 dark:text-gray-300 list-disc list-inside mb-2 space-y-0.5">');
             reasons.forEach(r => $ul.append($('<li>').text(r)));
@@ -3265,17 +3400,10 @@ class Turn {
         }
 
         if (codeSnippet) {
-            const highlights = (data.approval_info && data.approval_info.highlights) || null;
-            const $code = $('<code>');
-            if (highlights && highlights.length && typeof window.evHighlightCode === 'function') {
-                $code.html(window.evHighlightCode(codeSnippet, highlights));
-            } else {
-                $code.text(codeSnippet);
-            }
             $details.append(
                 $('<div class="mb-2">').append(
                     $('<div class="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1">').text('Code ').append($('<span class="font-normal text-gray-400">').text('(' + codeLang + ')')),
-                    $('<pre class="text-xs bg-gray-900 text-gray-100 rounded p-2 overflow-auto max-h-48 whitespace-pre-wrap break-all">').append($code)
+                    $('<pre class="text-xs bg-gray-900 text-gray-100 rounded p-2 overflow-auto max-h-48 whitespace-pre-wrap break-all">').append($('<code>').text(codeSnippet))
                 )
             );
         }
@@ -3301,6 +3429,17 @@ class Turn {
         this._smartScroll();
     }
 
+    _applySafetyBadge($entry, safety, approval) {
+        if (!$entry || !$entry.length) return;
+        if (!safety && !(approval && approval.decision)) return;
+        try {
+            applyBadge($entry, safety, approval);
+        } catch (e) {
+            // A badge must never break the timeline.
+            log.warn('safety badge failed', e);
+        }
+    }
+
     async _submitApproval(approvalId, decision, $card) {
         $card.find('.approval-actions button').prop('disabled', true);
         try {
@@ -3310,7 +3449,7 @@ class Turn {
                 body: JSON.stringify({approval_id: approvalId, decision}),
             });
             if (res.ok) {
-                this._markApprovalResolved($card, decision, false);
+                this._markApprovalResolved($card, decision, false, 'user:web');
             } else {
                 const body = await res.json().catch(() => ({}));
                 $card.find('.approval-status').text(body.error || 'Failed.').removeClass('hidden').addClass('text-red-600');
@@ -3324,19 +3463,25 @@ class Turn {
 
     _resolveApprovalCard(data) {
         const $card = this.$timeline.find(`[data-approval-id="${CSS.escape(data.approval_id)}"]`);
-        if ($card.length) this._markApprovalResolved($card, data.decision, data.timed_out);
+        if ($card.length) {
+            this._markApprovalResolved($card, data.decision, data.timed_out, data.decided_by);
+        }
     }
 
-    _markApprovalResolved($card, decision, timedOut) {
+    _markApprovalResolved($card, decision, timedOut, decidedBy) {
         $card.find('.approval-actions').addClass('hidden');
+        const actor = decidedBy || (timedOut ? 'timeout' : 'user:web');
+        const badge = describeBadge(null, { decision: decision, decided_by: actor });
+        const label = (badge && badge.label) || (decision === 'approve' ? 'You approved' : 'You declined');
         let statusText, statusClass, iconHtml;
         if (timedOut) {
-            statusText = 'Timed out — auto-rejected.'; statusClass = 'text-gray-500'; iconHtml = '&#x23F1; Timed out';
+            statusText = label + ' — auto-rejected.'; statusClass = 'text-gray-500'; iconHtml = '&#x23F1; ' + label;
         } else if (decision === 'approve') {
-            statusText = 'Approved — executing...'; statusClass = 'text-green-600'; iconHtml = uiIcon('check', 14) + ' Approved';
+            statusText = label + ' — executing...'; statusClass = 'text-green-600'; iconHtml = uiIcon('check', 14) + ' ' + label;
         } else {
-            statusText = 'Rejected.'; statusClass = 'text-red-500'; iconHtml = uiIcon('x', 14) + ' Rejected';
+            statusText = label + '.'; statusClass = 'text-red-500'; iconHtml = uiIcon('x', 14) + ' ' + label;
         }
+        $card.attr('data-decided-by', actor);
         $card.find('.approval-status').text(statusText).removeClass('hidden').addClass(statusClass);
         $card.find('.approval-summary-icon').html(iconHtml);
         $card.find('.approval-summary').removeClass('hidden').addClass('flex');
@@ -3448,7 +3593,8 @@ class ChatUI {
 
     
     appendMessage(role, content, opts = {}) {
-        const hasMeta = opts.metadata && (opts.metadata.image_url || opts.metadata.attachment_info);
+        // workplace_switch has no text of its own: the divider is drawn from the metadata
+        const hasMeta = opts.metadata && (opts.metadata.image_url || opts.metadata.attachment_info || opts.metadata.workplace_switch);
         if (role !== 'error' && (!content || !content.trim()) && !hasMeta) {
             this._log.warn('appendMessage SKIPPED empty/whitespace content', role);
             return $();
@@ -3592,7 +3738,14 @@ class ChatUI {
                 _ensureTurn();
                 let result;
                 try { result = JSON.parse(entry.content); } catch(e) { result = { data: entry.content }; }
-                thinkingTurn.ingest({ event: 'tool_executed', data: { tool: entry.function, result, error: !!entry.error }, seq: 0 });
+                thinkingTurn.ingest({ event: 'tool_executed', data: { tool: entry.function, result, error: !!entry.error,
+                                                                       safety: entry.safety || null,
+                                                                       approval: entry.approval || null }, seq: 0 });
+                // switch_workplace: end the bubble here and draw the divider, later steps start a new one.
+                if (entry.function === 'switch_workplace' && !entry.error && result && result.workplace_switch) {
+                    if (thinkingTurn) { thinkingTurn.ingest({ event: 'done', data: {}, seq: 0 }); thinkingTurn = null; }
+                    this.appendMessage('system', '', { metadata: { workplace_switch: result.workplace_switch }, timestamp: entry.ts || null });
+                }
                 continue;
             }
             if (entry.type === 'intermediate') {
@@ -3623,6 +3776,10 @@ class ChatUI {
             }
             if (entry.type === 'system') {
                 const sysMeta = (entry.metadata && (entry.metadata.slash_command || entry.metadata.bash_exec)) ? { metadata: { slash_command: entry.metadata.slash_command || false, bash_exec: entry.metadata.bash_exec || false } } : {};
+                if (entry.metadata && entry.metadata.workplace_switch) {
+                    sysMeta.metadata = { workplace_switch: entry.metadata.workplace_switch };
+                    sysMeta.timestamp = entry.ts || null;
+                }
                 this.appendMessage('system', entry.content || '', sysMeta);
                 continue;
             }

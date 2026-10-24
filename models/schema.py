@@ -391,6 +391,10 @@ class SchemaMixin:
                 ("enable_cmp", "BOOLEAN DEFAULT 0"),
                 # dm_only: agent hanya melayani pesan pribadi (DM); pesan grup ditolak.
                 ("dm_only", "INTEGER DEFAULT 0"),
+                # workplace_switch_*: opt-in `switch_workplace` built-in tool. The
+                # allowed list is a JSON array of workplace ids (empty = any).
+                ("workplace_switch_enabled", "INTEGER DEFAULT 0"),
+                ("workplace_switch_allowed", "TEXT"),
             ]:
                 try:
                     cursor.execute(f"ALTER TABLE agents ADD COLUMN {col} {defn}")
@@ -1213,6 +1217,12 @@ class SchemaMixin:
                         FROM tunnel_connectors_old
                     """)
                     cursor.execute("DROP TABLE tunnel_connectors_old")
+            except sqlite3.OperationalError:
+                pass
+
+            # Migration: device-reported IP addresses (comma-separated, from X-Device-IPs)
+            try:
+                cursor.execute("ALTER TABLE tunnel_connectors ADD COLUMN ip_addresses TEXT")
             except sqlite3.OperationalError:
                 pass
 

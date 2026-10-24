@@ -41,9 +41,11 @@
         var rows = '';
         if (data.active_model) {
             var am = data.active_model;
-            rows += am.is_fallback
-                ? kv(ICON.model, 'Model', '<span class="st-kv-v" title="Using the fallback model because the primary failed"><span class="st-dot amber"></span><span>' + esc(am.name) + '</span><button type="button" onclick="_resetActiveModel()" title="Reset to the primary model" aria-label="Reset to the primary model" style="display:inline-flex">' + small(ICON.undo) + '</button></span>')
-                : kv(ICON.model, 'Model', '<span class="st-kv-v"><span class="st-dot green"></span><span>' + esc(am.name) + '</span></span>');
+            var mdlTitle = am.is_session_override ? 'Model set for this session only' : (am.is_fallback ? 'Using the fallback model because the primary failed' : 'Switch the model for this session');
+            var mdlDot = am.is_session_override ? 'st-dot' : (am.is_fallback ? 'st-dot amber' : 'st-dot green');
+            var mdlDotStyle = am.is_session_override ? ' style="background:#6366f1;box-shadow:0 0 0 3px rgb(99 102 241 / .18)"' : '';
+            rows += kv(ICON.model, 'Model', '<button type="button" class="st-kv-v" onclick="_openModelDialog()" title="' + esc(mdlTitle) + ' — click to change"><span class="' + mdlDot + '"' + mdlDotStyle + '></span><span>' + esc(am.name) + '</span><span style="display:inline-flex;opacity:.55">' + small(ICON.chev) + '</span></button>'
+                + (am.is_fallback ? '<button type="button" class="st-kv-v" style="margin-left:.25rem" onclick="_resetActiveModel()" title="Reset to the primary model" aria-label="Reset to the primary model">' + small(ICON.undo) + '</button>' : ''));
         }
         if (data.focus) {
             rows += kv(ICON.focus, 'Focus', '<span class="st-kv-v" title="' + esc(data.focus_reason || '') + '"><span>' + esc(data.focus_reason || 'on') + '</span></span>');
@@ -183,7 +185,8 @@
         var h = '<div class="st-sec"><div class="st-sec-h">' + ICON.tasks + '<span>Tasks</span><span class="st-sec-r" title="' + done.length + ' of ' + d.tasks.length + ' done">' + pct + '% · ' + done.length + '/' + d.tasks.length + '</span></div>';
         h += '<div class="st-tasks-progress"><div class="st-meter"><div style="width:' + pct + '%;background:#22c55e"></div></div></div>';
         if (done.length) {
-            h += '<details class="st-done" ' + (global._stTasksDoneOpen ? 'open' : '') + ' ontoggle="_stTasksDoneOpen = this.open">'
+            var doneOpen = global._stTasksDoneOpen !== undefined ? global._stTasksDoneOpen : done.length < 10;
+            h += '<details class="st-done" ' + (doneOpen ? 'open' : '') + ' ontoggle="_stTasksDoneOpen = this.open">'
                + '<summary class="st-done-toggle">' + ICON.chev + '<span>Completed (' + done.length + ')</span></summary><ul>' + done.map(row).join('') + '</ul></details>';
         }
         if (open.length) h += '<ul>' + open.map(row).join('') + '</ul>';

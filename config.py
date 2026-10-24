@@ -46,6 +46,19 @@ def _get_env_bool(name: str, default: bool, invert: bool = False) -> bool:
     return not result if invert else result
 
 
+def get_two_factor_auth_override():
+    """Return the explicit ``ENABLE_2FA`` override, or ``None`` when unset.
+
+    An explicitly supplied environment value always wins over the database
+    setting. This is evaluated on access so test/deployment environments that
+    inject environment variables before process start behave predictably.
+    """
+    raw = os.getenv("ENABLE_2FA")
+    if raw is None:
+        return None
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 def _get_env_int(name: str, default: int, min_val: int = None, max_val: int = None) -> int:
     """Read an integer environment variable with validation and bounds clamping."""
     try:
@@ -303,6 +316,14 @@ ACTIVE_CONTEXT_RECENT_GROUPS = _get_env_int(
     "ACTIVE_CONTEXT_RECENT_GROUPS", 2, min_val=0, max_val=100)
 ACTIVE_CONTEXT_RECEIPT_MAX_CHARS = _get_env_int(
     "ACTIVE_CONTEXT_RECEIPT_MAX_CHARS", 4000, min_val=128, max_val=100_000)
+# Hard request-wide preflight. Shadow/canary measure only; enforced refuses an
+# over-budget provider call after deterministic reductions are exhausted.
+REQUEST_BUDGET_MODE = os.getenv("REQUEST_BUDGET_MODE", "enforced").strip().lower()
+if REQUEST_BUDGET_MODE not in ("off", "shadow", "canary", "enforced"):
+    _logger.warning("Invalid REQUEST_BUDGET_MODE=%r, using enforced", REQUEST_BUDGET_MODE)
+    REQUEST_BUDGET_MODE = "enforced"
+REQUEST_BUDGET_SAFETY_MARGIN = _get_env_int(
+    "REQUEST_BUDGET_SAFETY_MARGIN", 512, min_val=0, max_val=100_000)
 
 # RTK token compression — per-agent toggle with env var control
 # TOOL_COMPRESSION_ENABLED: True unless RTK_NO_COMPRESS=1 (env var force-disables)
