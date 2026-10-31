@@ -6,7 +6,6 @@ import (
 	"os"
 	"sync/atomic"
 
-	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 )
@@ -26,6 +25,9 @@ type LogWriter struct {
 	entry   *widget.RichText
 	scroll  *container.Scroll
 	epoch   atomic.Uint64
+	// gate keeps at most one render queued on the UI thread; a render that is
+	// already pending draws the newest snapshot instead of a stale one.
+	gate renderGate
 }
 
 func newLogWriter(entry *widget.RichText, scroll *container.Scroll) *LogWriter {
@@ -50,8 +52,15 @@ func (lw *LogWriter) Write(p []byte) (int, error) {
 // flusher goroutine and hops to the Fyne main goroutine via fyne.Do, which is
 // required on macOS/Cocoa.
 func (lw *LogWriter) render(text string) {
+	// Only one render may be in flight. If one is already queued, its closure
+	// draws this newer text instead, so the UI queue cannot grow.
+	if !lw.gate.offer(text) {
+		return
+	}
+
 	epoch := lw.epoch.Load()
-	fyne.Do(func() {
+	doUI(func() {
+		latest := lw.gate.take()
 		if lw.epoch.Load() != epoch {
 			return
 		}
@@ -61,7 +70,7 @@ func (lw *LogWriter) render(text string) {
 					ColorName: colorNameLogText,
 					Inline:    true,
 				},
-				Text: text,
+				Text: latest,
 			},
 		}
 		lw.entry.Refresh()
@@ -74,7 +83,7 @@ func (lw *LogWriter) Clear() {
 	lw.buf.clear()
 	epoch := lw.epoch.Add(1)
 
-	fyne.Do(func() {
+	doUI(func() {
 		if lw.epoch.Load() != epoch {
 			return
 		}

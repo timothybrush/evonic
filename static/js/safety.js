@@ -467,7 +467,7 @@
                 shadow: "HMADS decides; model decisions are recorded and compared.",
                 enforce: "The model decides when it can; HMADS is the exact fallback.",
             }[state]);
-            this._set("#sg-provider", dmssOn ? (settings.provider || "—") : "— (disabled)");
+            this._set("#sg-provider", dmssOn ? (settings.model_id || "—") : "— (disabled)");
             this._set("#sg-fallback",
                 (health.fallback_rate_24h === null || health.fallback_rate_24h === undefined)
                     ? "—" : (Math.round(health.fallback_rate_24h * 1000) / 10) + "%");
@@ -712,6 +712,50 @@
         return '<span class="dm-pill dm-tone-' + toneOf(v) + '">' + esc(humanize(v)) + "</span>";
     }
 
+    function fmtMs(ms) {
+        if (ms === null || ms === undefined || !Number.isFinite(Number(ms))) return "";
+        ms = Number(ms);
+        return ms < 1000 ? fmtNum(Math.round(ms)) + " ms" : (Math.round(ms / 100) / 10) + " s";
+    }
+
+    function sub(text) { return text ? '<span class="dm-sub">' + esc(text) + "</span>" : ""; }
+
+    /* Final verdict in user terms: Allowed / Needs approval / Blocked. */
+    var VERDICTS = {
+        safe: ["Allowed", "ok"], warning: ["Allowed", "ok"],
+        requires_approval: ["Needs approval", "warn"], dangerous: ["Blocked", "err"],
+    };
+    function verdictPill(level) {
+        var v = VERDICTS[level];
+        if (!v) return '<span class="dm-none">—</span>';
+        return '<span class="dm-pill dm-tone-' + v[1] + '">' + v[0] + "</span>";
+    }
+    function decidedLabel(e) { return e.decided_by === "dmss" ? "DMSS" : "HMADS"; }
+
+    /* HMADS rule output: verdict, matched categories, time. */
+    function hmadsCell(e) {
+        var cats = String(e.deterministic_categories || "").split(",").filter(Boolean).map(humanize).join(", ");
+        return pill(e.deterministic_level) + sub(cats) + sub(fmtMs(e.hmads_duration_ms));
+    }
+
+    /* DMSS output: a result, a failure, or not checked at all. */
+    function dmssResult(e, hideConfidence) {
+        if (e.model_decision) {
+            var conf = (hideConfidence || e.model_confidence == null) ? "" :
+                '<span class="dm-conf">' + Math.round(Number(e.model_confidence) * 100) + "%</span>";
+            return pill(e.model_decision) + conf;
+        }
+        if (e.fallback_reason) {
+            return '<span class="dm-fallback">Failed</span><span class="dm-conf">' + esc(humanize(e.fallback_reason)) + "</span>";
+        }
+        return '<span class="dm-none">Not checked</span>';
+    }
+    function dmssChecked(e) { return !!(e.model_decision || e.fallback_reason); }
+    function dmssCell(e) {
+        if (!dmssChecked(e)) return dmssResult(e);
+        return dmssResult(e) + sub(e.mode === "shadow" ? "shadow" : "") + sub(fmtMs(e.model_latency_ms));
+    }
+
     function confirmDialog(opts) {
         if (typeof window.showConfirm === "function") return window.showConfirm(opts);
         return Promise.resolve(window.confirm(opts.message));
@@ -746,7 +790,7 @@
             if (clear) clear.addEventListener("click", function () { window.safetyDmss.clearTelemetry(); });
             var retry = qs("#dmss-retry");
             if (retry) retry.addEventListener("click", function () { window.safetyDmss.refresh(); });
-            ["#f-window", "#f-mode", "#f-tool", "#f-unsafe"].forEach(function (sel) {
+            ["#f-window", "#f-agent", "#f-tool", "#f-decided", "#f-verdict"].forEach(function (sel) {
                 var el = qs(sel);
                 if (el) el.addEventListener("change", function () {
                     window.safetyDmss.state.offset = 0;
@@ -770,13 +814,14 @@
          * each other's read-modify-write on the server. Feedback mirrors the
          * System Settings AutoSave: spinner -> check beside the field label. */
         CONFIG_FIELDS: {
-            provider: { sel: "#dc-provider", key: "provider", kind: "select" },
-            endpoint: { sel: "#dc-endpoint", key: "provider_endpoint", kind: "text" },
+            model: { sel: "#dc-model", key: "model_id", kind: "select" },
             timeout: { sel: "#dc-timeout", key: "request_timeout_ms", kind: "num" },
             confidence: { sel: "#dc-confidence", key: "minimum_confidence", kind: "num" },
             payload: { sel: "#dc-payload", key: "max_payload_chars", kind: "num" },
             failures: { sel: "#dc-failures", key: "circuit_breaker_failures", kind: "num" },
             cooldown: { sel: "#dc-cooldown", key: "circuit_breaker_cooldown_seconds", kind: "num" },
+            record: { sel: "#dc-record", key: "record_enforce_events", kind: "switch" },
+            floor: { sel: "#dc-floor", key: "hmads_floor", kind: "switch" },
         },
         CONFIG_DEBOUNCE_MS: 800,
         _cfgTimers: {},
@@ -796,7 +841,7 @@
                 var f = self.CONFIG_FIELDS[name];
                 var el = qs(f.sel);
                 if (!el) return;
-                if (f.kind === "select") {
+                if (f.kind === "select" || f.kind === "switch") {
                     el.addEventListener("change", function () { self._flushField(name); });
                 } else {
                     // typing, -/+ steppers and the confidence slider all fire "input"
@@ -805,15 +850,15 @@
                 }
             });
 
-            // One-click connectivity check beside the endpoint field (task #895).
-            var testBtn = qs("#dc-endpoint-test");
+            // One-click connectivity check beside the model field (task #895).
+            var testBtn = qs("#dc-model-test");
             if (testBtn) {
                 testBtn.addEventListener("click", function () { self.testEndpoint(); });
             }
-            // A new URL invalidates the previous verdict.
-            var endpointInput = qs("#dc-endpoint");
-            if (endpointInput) {
-                endpointInput.addEventListener("input", function () { self._clearEndpointTest(); });
+            // A new model invalidates the previous verdict.
+            var modelSelect = qs("#dc-model");
+            if (modelSelect) {
+                modelSelect.addEventListener("change", function () { self._clearEndpointTest(); });
             }
         },
 
@@ -824,7 +869,7 @@
         _endpointTesting: false,
 
         _clearEndpointTest() {
-            var out = qs("#dc-endpoint-test-result");
+            var out = qs("#dc-model-test-result");
             if (!out) return;
             out.hidden = true;
             out.className = "dc-test-result";
@@ -833,7 +878,7 @@
 
         /* state: "pending" | "ok" | "err" */
         _renderEndpointTest(state, message, detail) {
-            var out = qs("#dc-endpoint-test-result");
+            var out = qs("#dc-model-test-result");
             if (!out) return;
             out.hidden = false;
             out.className = "dc-test-result is-" + state;
@@ -852,29 +897,24 @@
 
         testEndpoint() {
             if (this._endpointTesting) return;
-            var input = qs("#dc-endpoint");
-            var btn = qs("#dc-endpoint-test");
-            var value = input ? input.value.trim() : "";
-            var invalid = value ? this._fieldError("endpoint", value) : "";
-            if (invalid) {
-                this._setConfigError("endpoint", invalid);
-                this._renderEndpointTest("err", invalid);
-                if (input) input.focus();
+            var input = qs("#dc-model");
+            var btn = qs("#dc-model-test");
+            var value = input ? input.value : "";
+            if (!value) {
+                this._renderEndpointTest("err", "Select a decision model to test.");
                 return;
             }
-            this._setConfigError("endpoint", "");
 
             var self = this;
             this._endpointTesting = true;
             if (btn) { btn.disabled = true; btn.classList.add("is-busy"); }
-            this._renderEndpointTest("pending", "Checking the provider endpoint\u2026");
+            this._renderEndpointTest("pending", "Checking the decision model\u2026");
 
             fetch(this.API + "/endpoint/test", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                // An empty field means "test whatever is configured" (the probe
-                // then reads the saved value, including any environment default).
-                body: JSON.stringify(value ? { endpoint: value } : {}),
+                // The selection is probed as-is, even before it is saved.
+                body: JSON.stringify({ model_id: value }),
             }).then(function (r) {
                 // A non-JSON body (for example the HTML 404 returned when the API
                 // route is missing from the running build) must never be reported
@@ -918,13 +958,14 @@
                 self._endpointTesting = false;
                 if (btn) { btn.disabled = false; btn.classList.remove("is-busy"); }
                 self._renderEndpointTest("err",
-                    "Network error \u2014 the Evonic API could not be reached, so the provider endpoint was never contacted.");
+                    "Network error \u2014 the Evonic API could not be reached, so the decision model was never contacted.");
             });
         },
 
         _fieldValue(name) {
             var f = this.CONFIG_FIELDS[name], el = qs(f.sel);
             if (!el) return undefined;
+            if (f.kind === "switch") return !!el.checked;
             return f.kind === "num" ? NumField.value(el) : el.value.trim();
         },
 
@@ -932,8 +973,6 @@
         _fieldError(name, v) {
             function intIn(lo, hi) { return Number.isInteger(v) && v >= lo && v <= hi; }
             switch (name) {
-                case "provider": return v === "systemone" ? "" : "Choose a registered provider.";
-                case "endpoint": return (!v || /^https?:\/\/[^/]+/i.test(v)) ? "" : "Enter an absolute http(s) URL.";
                 case "timeout": return intIn(100, 10000) ? "" : "Use 100–10,000 ms.";
                 case "confidence": return (Number.isFinite(v) && v >= 0 && v <= 1) ? "" : "Use a value from 0 to 1.";
                 case "payload": return intIn(1, 120000) ? "" : "Use 1–120,000 characters.";
@@ -945,8 +984,8 @@
 
         _sameAsSaved(name, v) {
             var saved = (this._config || {})[this.CONFIG_FIELDS[name].key];
-            if (name === "endpoint") return (v || "") === (saved || "");
-            if (name === "provider") return v === saved;
+            if (this.CONFIG_FIELDS[name].kind === "switch") return !!v === !!saved;
+            if (name === "model") return (v || "") === (saved || "");
             return Number.isFinite(v) && Number(saved) === v;
         },
 
@@ -1057,7 +1096,8 @@
         _applyField(name, v) {
             var f = this.CONFIG_FIELDS[name], el = qs(f.sel);
             if (!el) return;
-            if (f.kind === "num") NumField.set(el, Number(v));
+            if (f.kind === "switch") el.checked = !!v;
+            else if (f.kind === "num") NumField.set(el, Number(v));
             else el.value = (v === null || v === undefined) ? "" : v;
         },
 
@@ -1073,10 +1113,29 @@
             });
         },
 
+        /* Decision models for the DMSS dropdown; the saved one stays listed even
+         * if it was since disabled, so the select never silently changes. */
+        _populateModels(models, selected) {
+            var el = qs("#dc-model");
+            if (!el) return;
+            var opts = '<option value="">None (HMADS only)</option>';
+            (models || []).forEach(function (m) {
+                if (m.type !== "decision" || (!m.enabled && m.id !== selected)) return;
+                opts += '<option value="' + esc(m.id) + '">' + esc(m.name || m.id) +
+                    (m.enabled ? "" : " (disabled)") + "</option>";
+            });
+            el.innerHTML = opts;
+        },
+
         loadConfig() {
             var self = this;
-            return fetch("/api/settings/decim-safety").then(function (r) { if (!r.ok) throw new Error(); return r.json(); }).then(function (data) {
+            return Promise.all([
+                fetch("/api/settings/decim-safety").then(function (r) { if (!r.ok) throw new Error(); return r.json(); }),
+                fetch("/api/models").then(function (r) { return r.ok ? r.json() : { models: [] }; }),
+            ]).then(function (res) {
+                var data = res[0];
                 self._config = data.settings || {};
+                self._populateModels(res[1].models, self._config.model_id);
                 self._applyConfig(self._config);
             }).catch(function () { window.safetyDmss._setError(true, "Failed to load DMSS configuration."); return false; });
         },
@@ -1086,8 +1145,8 @@
             var w = qs("#f-window");
             var v = w ? parseInt(w.value, 10) : 168;
             p.set("window_hours", String(isNaN(v) ? 168 : v));
-            var m = qs("#f-mode");
-            if (m && m.value) p.set("mode", m.value);
+            var a = qs("#f-agent");
+            if (a && a.value) p.set("agent_id", a.value);
             var t = qs("#f-tool");
             if (t && t.value) p.set("tool_type", t.value);
             return p;
@@ -1106,7 +1165,7 @@
         /* Resolves to true only when every section loaded. */
         refresh() {
             // Reload the config form too; fields being edited are left alone.
-            var tasks = [this.loadHealth(), this.loadSummary(), this.loadEvents(), this.loadConfig()];
+            var tasks = [this.loadHealth(), this.loadAgents(), this.loadSummary(), this.loadEvents(), this.loadConfig()];
             return Promise.all(tasks).then(function (res) {
                 var ok = res.every(function (r) { return r !== false; });
                 if (ok) RefreshButton.stamp("#dmss-updated");
@@ -1122,6 +1181,7 @@
                 return r.json();
             }).then(function (d) {
                 window.safetyDmss._setError(false);
+                window.safetyDmss._health = d;
                 var mode = d.enabled ? (d.mode || "off") : "off";
                 var state = mode === "enforce" ? "enforce" : (mode === "shadow" ? "shadow" : "off");
                 if (card) card.dataset.state = state;
@@ -1131,9 +1191,21 @@
                     shadow: "Recorded only, HMADS decides",
                     enforce: "Model decides, HMADS fallback",
                 }[state]);
-                var provider = qs("#dc-provider");
-                var providerOpt = provider && Array.prototype.find.call(provider.options, function (o) { return o.value === d.provider; });
-                text("#kpi-provider", providerOpt ? providerOpt.textContent : (d.provider || "—"));
+                var model = qs("#dc-model");
+                var modelOpt = model && Array.prototype.find.call(model.options, function (o) { return o.value && o.value === d.model_id; });
+                text("#kpi-provider", modelOpt ? modelOpt.textContent : (d.model_id || "—"));
+                // Recording indicator (was lost in the dashboard redesign): it
+                // answers "will this decision leave a trace?" at a glance.
+                var rec = qs("#kpi-recording");
+                if (rec) {
+                    var on = !!d.recording;
+                    rec.hidden = !on;
+                    if (on) {
+                        rec.textContent = d.hmads_floor ? "recording \u00b7 floor" : "recording";
+                        rec.className = "sf-badge sf-badge-ok";
+                        rec.title = "Scoped checks are written to the activity table.";
+                    }
+                }
                 var circuit = (d.circuit_state || "closed").toLowerCase();
                 var cb = qs("#kpi-circuit");
                 if (cb) {
@@ -1173,41 +1245,49 @@
                     (d.unsafe && d.unsafe.final != null)
                         ? (fmtNum(d.unsafe.final) + " unsafe (" + fmtPct(d.unsafe.final_rate || 0) + ")")
                         : "—");
-                window.safetyDmss._renderBars("#tbl-decisions", d.decision_distribution || {});
-                window.safetyDmss._renderBars("#tbl-agreement", d.agreement_matrix || {});
+                var verdicts = d.final_verdicts || {};
+                var decided = d.decided_by || {};
+                var total = d.total_comparisons || 0;
+                text("#stat-total", fmtNum(total));
+                text("#stat-blocked", fmtNum(verdicts.blocked || 0));
+                text("#stat-approval", fmtNum(verdicts.approval || 0));
+                text("#stat-decided", total
+                    ? "DMSS " + fmtPct((decided.dmss || 0) / total) + " · HMADS " + fmtPct((decided.hmads || 0) / total)
+                    : "—");
             }).catch(function (e) {
                 console.error("DMSS summary failed:", e);
                 return false;
             });
         },
 
-        /* Count map -> labelled horizontal bars (share of the window total). */
-        _renderBars(sel, obj) {
-            var el = qs(sel);
-            if (!el) return;
-            var keys = Object.keys(obj).sort(function (a, b) { return (Number(obj[b]) || 0) - (Number(obj[a]) || 0); });
-            var total = keys.reduce(function (s, k) { return s + (Number(obj[k]) || 0); }, 0);
-            if (!keys.length || !total) {
-                el.innerHTML = '<div class="dm-bars-empty">No data in this window</div>';
-                return;
-            }
-            el.innerHTML = keys.map(function (k) {
-                var n = Number(obj[k]) || 0;
-                var pct = total ? (n / total) * 100 : 0;
-                return '<div class="dm-bar dm-tone-' + toneOf(k) + '">' +
-                    '<span class="dm-bar-label">' + esc(humanize(k)) + "</span>" +
-                    '<span class="dm-bar-track" aria-hidden="true"><span class="dm-bar-fill" style="width:' + Math.max(pct, n ? 1.5 : 0).toFixed(1) + '%"></span></span>' +
-                    '<span class="dm-bar-num">' + fmtNum(n) + '<span class="dm-bar-pct">' + (Math.round(pct * 10) / 10) + "%</span></span>" +
-                    "</div>";
-            }).join("");
+        /* Agent filter options: agents with recorded events; keeps the selection. */
+        loadAgents() {
+            var select = qs("#f-agent");
+            if (!select) return Promise.resolve(true);
+            return fetch(this.API + "/agents").then(function (r) {
+                if (!r.ok) throw new Error("HTTP " + r.status);
+                return r.json();
+            }).then(function (d) {
+                var current = select.value;
+                select.innerHTML = '<option value="">Any</option>' + (d.agents || []).map(function (a) {
+                    return '<option value="' + esc(a.id) + '">' + esc(a.name || a.id) + "</option>";
+                }).join("");
+                select.value = current;
+                if (select.value !== current) select.value = "";
+            }).catch(function (e) {
+                console.error("DMSS agents failed:", e);
+                return false;
+            });
         },
 
         loadEvents() {
             var p = this._filters();
             p.set("limit", String(this.state.limit));
             p.set("offset", String(this.state.offset));
-            var unsafe = qs("#f-unsafe");
-            if (unsafe && unsafe.checked) p.set("unsafe_only", "1");
+            var decided = qs("#f-decided");
+            if (decided && decided.value) p.set("decided_by", decided.value);
+            var verdict = qs("#f-verdict");
+            if (verdict && verdict.value) p.set("verdict", verdict.value);
             var body = qs("#tbl-events-body");
             if (!body) return Promise.resolve(true);
 
@@ -1215,35 +1295,53 @@
                 if (!r.ok) throw new Error("HTTP " + r.status);
                 return r.json();
             }).then(function (d) {
+                if (d.error) {
+                    // An unreadable table used to render as "no events", which
+                    // made a broken telemetry store indistinguishable from an
+                    // idle one.  Say what actually happened.
+                    window.safetyDmss.state.total = 0;
+                    var countEl = qs("#dmss-events-count");
+                    if (countEl) countEl.textContent = "";
+                    body.innerHTML = '<tr><td colspan="7" class="sf-empty-cell sf-empty-cell-err">' +
+                        "<strong>Activity storage unavailable</strong>" +
+                        "<span>" + esc(d.error_detail || "The telemetry table could not be read.") +
+                        "</span></td></tr>";
+                    window.safetyDmss._setError(true,
+                        "The DMSS activity table cannot be read, so decisions are not listed (" +
+                        (d.error_detail || d.error) + ").");
+                    return false;
+                }
                 window.safetyDmss._setError(false);
                 window.safetyDmss.state.total = d.total || 0;
                 var count = qs("#dmss-events-count");
                 if (count) count.textContent = d.total ? fmtNum(d.total) + (d.total === 1 ? " event" : " events") : "";
                 var events = d.events || [];
-                var unsafeOnly = !!(unsafe && unsafe.checked);
+                var filtered = !!(verdict && verdict.value);
+                var health = window.safetyDmss._health || {};
+                var notRecording = health.enabled && health.mode === "enforce" &&
+                    !health.record_enforce_events;
                 if (!events.length) {
-                    body.innerHTML = '<tr><td colspan="10" class="sf-empty-cell dm-events-empty">' +
+                    body.innerHTML = '<tr><td colspan="7" class="sf-empty-cell dm-events-empty">' +
                         "<strong>No events in this window</strong>" +
-                        "<span>" + (unsafeOnly
-                            ? "Only commands flagged as unsafe are shown. Turn off “Unsafe only” to see every decision."
-                            : "Decisions appear here once agents run bash or python commands.") + "</span></td></tr>";
+                        "<span>" + (filtered
+                            ? "Only commands matching the Verdict filter are shown. Set it to “Any” to see every check."
+                            : (notRecording
+                                ? "Recording of allowed decisions is off, so only refusals are stored. Turn on \u201cRecord allowed decisions\u201d in Enforce behaviour to record every check."
+                                : "Checks appear here once agents run bash or python commands.")) + "</span></td></tr>";
                 } else {
                     body.innerHTML = events.map(function (e, index) {
-                        var conf = e.model_confidence == null ? "" :
-                            '<span class="dm-conf">' + Math.round(Number(e.model_confidence) * 100) + "%</span>";
-                        var model = e.model_decision ? pill(e.model_decision) + conf : '<span class="dm-none">—</span>';
-                        return '<tr data-event-index="' + index + '" tabindex="0" title="Show detection details">' +
-                            '<td class="dm-when" title="' + esc(e.occurred_at) + '">' + esc(fmtWhen(e.occurred_at)) +
-                                '<span class="dm-sub">' + esc(humanize(e.mode)) + "</span></td>" +
-                            '<td><span class="dm-tool">' + esc(e.tool_type || "—") + "</span></td>" +
-                            "<td>" + pill(e.final_level) + "</td>" +
-                            "<td>" + esc(humanize(e.decision_source)) + "</td>" +
-                            "<td>" + model + "</td>" +
-                            "<td>" + (e.agreement ? '<span class="dm-agree dm-tone-' + toneOf(e.agreement) + '">' + esc(humanize(e.agreement)) + "</span>" : '<span class="dm-none">—</span>') + "</td>" +
-                            "<td>" + (e.fallback_reason ? '<span class="dm-fallback">' + esc(humanize(e.fallback_reason)) + "</span>" : '<span class="dm-none">—</span>') + "</td>" +
-                            "<td>" + esc(humanize(e.disposition)) + "</td>" +
-                            '<td class="mono">' + esc(e.command_fingerprint || "—") +
-                                (e.command_length != null ? '<span class="dm-sub">' + fmtNum(e.command_length) + " chars</span>" : "") + "</td>" +
+                        var agent = e.agent_name || e.agent_id;
+                        var command = e.detection_command || "";
+                        var note = "by " + decidedLabel(e) + (e.disposition === "execution_failed" ? " · execution failed" : "");
+                        return '<tr data-event-index="' + index + '" tabindex="0" title="Show details">' +
+                            '<td class="dm-when" title="' + esc(e.occurred_at) + '">' + esc(fmtWhen(e.occurred_at)) + "</td>" +
+                            "<td>" + (agent ? esc(agent) : '<span class="dm-none">—</span>') + "</td>" +
+                            '<td class="dm-col-cmd"><span class="dm-tool">' + esc(e.tool_type || "—") + "</span>" +
+                                (command ? '<code class="dm-cmd" title="' + esc(command) + '">' + esc(command) + "</code>"
+                                         : '<span class="dm-sub">Not recorded</span>') + "</td>" +
+                            "<td>" + hmadsCell(e) + "</td>" +
+                            "<td>" + dmssCell(e) + "</td>" +
+                            "<td>" + verdictPill(e.final_level) + sub(note) + "</td>" +
                             '<td class="dm-col-go"><i data-lucide="chevron-right"></i></td>' +
                             "</tr>";
                     }).join("");
@@ -1263,7 +1361,7 @@
                 window.safetyDmss._renderPager();
             }).catch(function (e) {
                 console.error("DMSS events failed:", e);
-                body.innerHTML = '<tr><td colspan="10" class="sf-empty-cell sf-empty-cell-err">Failed to load events.</td></tr>';
+                body.innerHTML = '<tr><td colspan="7" class="sf-empty-cell sf-empty-cell-err">Failed to load events.</td></tr>';
                 window.safetyDmss._setError(true, "Failed to load the activity table — check the Decim Safety service and retry.");
                 return false;
             });
@@ -1465,8 +1563,8 @@
             }
             row("confidence", d.confidence == null ? "—" : (Math.round(d.confidence * 1000) / 10) + "%");
             row("latency", d.latency_ms == null ? "—" : d.latency_ms + " ms");
-            row("provider", d.provider || "—");
-            row("model", d.model || "—");
+            row("model", d.model_id || "—");
+            if (d.model && d.model !== d.model_id) row("served as", d.model);
             row("payload", (d.payload_chars != null ? d.payload_chars : 0) + " chars · " + (d.tool_type || "bash"));
 
             var notes = [];
@@ -1651,47 +1749,39 @@
             var copy = qs("#dmss-command-copy");
             if (copy) copy.disabled = !command;
 
-            var meta = [];
-            if (e.command_fingerprint) meta.push("fingerprint " + e.command_fingerprint);
-            if (e.command_length != null) meta.push(fmtNum(e.command_length) + " chars executed");
             var metaEl = qs("#dmss-command-meta");
-            if (metaEl) metaEl.textContent = meta.join(" \u00b7 ");
+            if (metaEl) metaEl.textContent = e.command_length != null ? fmtNum(e.command_length) + " chars executed" : "";
 
-            /* --- Detection --- */
-            var type = e.detection_type ? String(e.detection_type) : "";
-            if (!type) setText("dmss-detection-type", "Not recorded for this event");
-            else if (type === "model") setText("dmss-detection-type", "Model verdict only (no rule matched)");
-            else if (type === "none") setText("dmss-detection-type", "No detection triggered");
-            else setHtml("dmss-detection-type", categoryChips(type));
-
-            setHtml("dmss-rule-categories", categoryChips(e.deterministic_categories));
-            setHtml("dmss-rule-verdict", pill(e.deterministic_level));
-            setText("dmss-rule-score", e.deterministic_score == null ? "\u2014" : fmtNum(e.deterministic_score));
-            setHtml("dmss-model-decision", e.model_decision ? pill(e.model_decision)
-                : '<span class="dm-none">No model verdict</span>');
-            setText("dmss-model-confidence", e.model_confidence == null ? "\u2014" : fmtPct(e.model_confidence));
-            setText("dmss-model-latency", e.model_latency_ms == null ? "\u2014" : fmtNum(e.model_latency_ms) + " ms");
-            setHtml("dmss-agreement", e.agreement
-                ? '<span class="dm-agree dm-tone-' + toneOf(e.agreement) + '">' + esc(humanize(e.agreement)) + "</span>"
-                : '<span class="dm-none">\u2014</span>');
-            setText("dmss-fallback-reason", e.fallback_reason ? humanize(e.fallback_reason) : "\u2014");
-
-            /* --- Decision --- */
-            setHtml("dmss-final-level", pill(e.final_level));
-            setText("dmss-decision-source", humanize(e.decision_source));
-            setText("dmss-disposition", humanize(e.disposition));
-            setText("dmss-mode", humanize(e.mode));
-
-            /* --- Metadata --- */
-            setText("dmss-event-id", e.id || "Not recorded");
-            setText("dmss-occurred-at", e.occurred_at ? fmtWhen(e.occurred_at) + " \u00b7 " + e.occurred_at : "\u2014");
+            /* --- Summary --- */
+            setText("dmss-agent", e.agent_name || e.agent_id || "Not recorded");
             setText("dmss-tool-type", e.tool_type);
-            setText("dmss-boundary", humanize(e.execution_boundary));
+            setText("dmss-occurred-at", e.occurred_at ? fmtWhen(e.occurred_at) + " \u00b7 " + e.occurred_at : "\u2014");
+            setHtml("dmss-final-level", verdictPill(e.final_level) +
+                (e.disposition === "execution_failed" ? ' <span class="dm-conf">execution failed</span>' : ""));
+            setText("dmss-decided-by", decidedLabel(e) +
+                (e.decided_by !== "dmss" && dmssChecked(e)
+                    ? (e.mode === "shadow" ? " (DMSS in shadow mode)"
+                        : e.model_decision ? " (stricter rule)" : " (DMSS failed)")
+                    : ""));
+
+            /* --- HMADS --- */
+            setHtml("dmss-rule-verdict", pill(e.deterministic_level));
+            setHtml("dmss-rule-categories", categoryChips(e.deterministic_categories));
+            setText("dmss-rule-score", e.deterministic_score == null ? "\u2014" : fmtNum(e.deterministic_score));
+            setText("dmss-rule-time", fmtMs(e.hmads_duration_ms) || "\u2014");
+
+            /* --- DMSS --- */
+            setHtml("dmss-model-decision", dmssResult(e, true) +
+                (dmssChecked(e) && e.mode === "shadow" ? ' <span class="dm-conf">shadow</span>' : ""));
+            setText("dmss-model-confidence", e.model_confidence == null ? "\u2014" : fmtPct(e.model_confidence));
+            setText("dmss-model-latency", dmssChecked(e) ? (fmtMs(e.model_latency_ms) || "\u2014") : "\u2014");
+            setText("dmss-model-id", e.model_id);
+
+            /* --- Technical --- */
+            setText("dmss-event-id", e.id || "Not recorded");
+            setText("dmss-mode", humanize(e.mode));
             setText("dmss-policy-version", e.policy_version);
             setText("dmss-provider", e.provider_key);
-            setText("dmss-model-id", e.model_id);
-            setText("dmss-correlation-id", e.correlation_id || "\u2014");
-            setText("dmss-expires-at", e.expires_at ? fmtWhen(e.expires_at) + " \u00b7 " + e.expires_at : "\u2014");
         },
 
         copyCommand() {

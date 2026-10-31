@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}?v=19">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/safety.css') }}?v=15">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/safety.css') }}?v=16">
 
 <div class="settings-console safety-console">
     <div class="settings-console-header">
@@ -65,7 +65,7 @@
             </div>
             <dl id="sg-status" class="sg-facts" hidden>
                 <div class="sg-fact">
-                    <dt>Provider</dt>
+                    <dt>Decision model</dt>
                     <dd><span id="sg-provider">—</span> <span id="sg-circuit-badge" class="sf-badge sf-badge-muted">closed</span></dd>
                 </div>
                 <div class="sg-fact">
@@ -158,7 +158,7 @@
                         <label class="sg-mode-opt">
                             <input type="radio" name="sg-mode" value="enforce" id="sg-radio-enforce">
                             <span class="sg-mode-name"><i data-lucide="gavel"></i>Enforce</span>
-                            <span class="sg-mode-desc">The model decides when it can; HMADS is the exact fallback.</span>
+                            <span class="sg-mode-desc">The model decides first; HMADS runs only as the exact fallback.</span>
                         </label>
                     </div>
                     <span class="sg-mode-off">Not used while the policy is &ldquo;HMADS only&rdquo; (effective mode: <code>off</code>).</span>
@@ -178,7 +178,10 @@
                     <li class="sg-step sg-step-hmads">
                         <span class="sg-step-dot" aria-hidden="true"><i data-lucide="shield-alert"></i></span>
                         <span class="sg-step-name">HMADS scores it</span>
-                        <span class="sg-step-note">Deterministic rules, always run</span>
+                        <span class="sg-step-note">
+                            <span class="sg-when-off sg-when-shadow">Deterministic rules, always run</span>
+                            <span class="sg-when-enforce">Only when the DMSS decision is unusable</span>
+                        </span>
                     </li>
                     <li class="sg-step sg-step-dmss">
                         <span class="sg-step-dot" aria-hidden="true"><i data-lucide="brain-circuit"></i></span>
@@ -245,9 +248,12 @@
                 <div class="sf-kpi-sub" id="kpi-mode">—</div>
             </div>
             <div class="sf-kpi">
-                <div class="sf-kpi-label">Provider</div>
+                <div class="sf-kpi-label">Decision model</div>
                 <div class="sf-kpi-value" id="kpi-provider">—</div>
-                <div class="sf-kpi-sub"><span id="kpi-circuit" class="sf-badge sf-badge-muted">circuit —</span></div>
+                <div class="sf-kpi-sub">
+                    <span id="kpi-circuit" class="sf-badge sf-badge-muted">circuit —</span>
+                    <span id="kpi-recording" class="sf-badge sf-badge-ok" hidden>recording</span>
+                </div>
             </div>
             <div class="sf-kpi">
                 <div class="sf-kpi-label">Comparisons</div>
@@ -281,36 +287,20 @@
                 <div class="dc-row">
                     <div class="dc-row-text">
                         <div class="dc-label-row">
-                            <label class="dc-label" for="dc-provider">Provider</label>
-                            <span class="save-status" id="dc-status-provider" aria-live="polite"></span>
+                            <label class="dc-label" for="dc-model">Decision model</label>
+                            <span class="save-status" id="dc-status-model" aria-live="polite"></span>
                         </div>
-                        <span class="dc-desc">The registered decision service.</span>
-                    </div>
-                    <div class="dc-row-control">
-                        <select id="dc-provider" class="sf-select dc-select"><option value="systemone">SystemOne</option></select>
-                        <span class="sf-field-err" id="dc-err-provider" hidden></span>
-                    </div>
-                </div>
-                <div class="dc-row dc-row-wide">
-                    <div class="dc-row-text">
-                        <div class="dc-label-row">
-                            <label class="dc-label" for="dc-endpoint">Provider endpoint</label>
-                            <span class="save-status" id="dc-status-endpoint" aria-live="polite"></span>
-                        </div>
-                        <span class="dc-desc">Absolute http(s) URL of the provider decision service. Stored as plain configuration and shown here in full.</span>
+                        <span class="dc-desc">A decision model from <a href="/system#models">System &rsaquo; Models</a>. Its provider supplies the endpoint and credentials.</span>
                     </div>
                     <div class="dc-row-control">
                         <div class="dc-endpoint-row">
-                            <div class="dc-affix">
-                                <i data-lucide="globe" aria-hidden="true"></i>
-                                <input id="dc-endpoint" class="sf-input" type="text" autocomplete="off" spellcheck="false" placeholder="https://…">
-                            </div>
-                            <button type="button" class="sf-btn dc-test-btn" id="dc-endpoint-test">
+                            <select id="dc-model" class="sf-select dc-select"><option value="">None (HMADS only)</option></select>
+                            <button type="button" class="sf-btn dc-test-btn" id="dc-model-test">
                                 <i data-lucide="plug-zap" aria-hidden="true"></i><span>Test</span>
                             </button>
                         </div>
-                        <span class="sf-field-err" id="dc-err-endpoint" hidden></span>
-                        <div id="dc-endpoint-test-result" class="dc-test-result" role="status" aria-live="polite" hidden></div>
+                        <span class="sf-field-err" id="dc-err-model" hidden></span>
+                        <div id="dc-model-test-result" class="dc-test-result" role="status" aria-live="polite" hidden></div>
                     </div>
                 </div>
             </fieldset>
@@ -421,6 +411,52 @@
                 </div>
             </fieldset>
 
+            <!-- Enforce behaviour: what an allowed model decision actually does -->
+            <fieldset class="dc-group">
+                <legend class="dc-group-title"><i data-lucide="gavel"></i>Enforce behaviour</legend>
+                <div class="dc-row">
+                    <div class="dc-row-text">
+                        <div class="dc-label-row">
+                            <label class="dc-label" for="dc-record">Record allowed decisions</label>
+                            <span class="save-status" id="dc-status-record" aria-live="polite"></span>
+                        </div>
+                        <span class="dc-desc">
+                            In enforce mode an allowed command is stored in the activity table only while
+                            this is on. Refusals are always recorded. Turning it off leaves no trace of
+                            what the model cleared.
+                        </span>
+                    </div>
+                    <div class="dc-row-control">
+                        <label class="dc-switch">
+                            <input type="checkbox" id="dc-record" role="switch">
+                            <span class="dc-switch-track" aria-hidden="true"></span>
+                        </label>
+                        <span class="sf-field-err" id="dc-err-record" hidden></span>
+                    </div>
+                </div>
+                <div class="dc-row">
+                    <div class="dc-row-text">
+                        <div class="dc-label-row">
+                            <label class="dc-label" for="dc-floor">HMADS safety floor</label>
+                            <span class="save-status" id="dc-status-floor" aria-live="polite"></span>
+                        </div>
+                        <span class="dc-desc">
+                            Score every command with HMADS as well, and let that verdict raise the DMSS
+                            severity when it is stricter. The floor can only make a decision stricter,
+                            never more permissive — it is how local rules such as
+                            <code>git add -A</code> still apply in enforce mode.
+                        </span>
+                    </div>
+                    <div class="dc-row-control">
+                        <label class="dc-switch">
+                            <input type="checkbox" id="dc-floor" role="switch">
+                            <span class="dc-switch-track" aria-hidden="true"></span>
+                        </label>
+                        <span class="sf-field-err" id="dc-err-floor" hidden></span>
+                    </div>
+                </div>
+            </fieldset>
+
         </form>
 
         <!-- Diagnostic tester (task #839): sits under the config it exercises -->
@@ -472,7 +508,7 @@
             <div class="dm-card-head">
                 <div>
                     <h3 id="dm-telemetry-title"><i data-lucide="activity"></i>Telemetry</h3>
-                    <p>How DMSS and HMADS decided recent commands. Click a row for the full detection.</p>
+                    <p>Every command an agent ran, what HMADS and DMSS each said, and the final verdict. Click a row for details.</p>
                 </div>
                 <button type="button" class="sf-btn dm-btn-quiet-danger" id="dmss-clear">
                     <i data-lucide="trash-2"></i>Clear telemetry
@@ -490,11 +526,9 @@
                     </select>
                 </label>
                 <label class="dm-filter">
-                    <span>Mode</span>
-                    <select id="f-mode" class="sf-select">
+                    <span>Agent</span>
+                    <select id="f-agent" class="sf-select">
                         <option value="">Any</option>
-                        <option value="shadow">Shadow</option>
-                        <option value="enforce">Enforce</option>
                     </select>
                 </label>
                 <label class="dm-filter">
@@ -505,39 +539,59 @@
                         <option value="python">python</option>
                     </select>
                 </label>
-                <label class="dm-filter dm-filter-switch relative cursor-pointer">
-                    <input type="checkbox" id="f-unsafe" class="sr-only peer" checked>
-                    <span class="dyn-toggle"></span>
-                    <span>Unsafe only</span>
+                <label class="dm-filter">
+                    <span>Decided by</span>
+                    <select id="f-decided" class="sf-select">
+                        <option value="">Any</option>
+                        <option value="dmss">DMSS</option>
+                        <option value="hmads">HMADS</option>
+                    </select>
+                </label>
+                <label class="dm-filter">
+                    <span>Verdict</span>
+                    <select id="f-verdict" class="sf-select">
+                        <option value="">Any</option>
+                        <option value="unsafe" selected>Blocked + needs approval</option>
+                        <option value="blocked">Blocked</option>
+                        <option value="approval">Needs approval</option>
+                        <option value="allowed">Allowed</option>
+                    </select>
                 </label>
             </div>
 
-            <div class="dm-dist">
-                <div class="dm-dist-panel">
-                    <div class="dm-dist-title">Final decisions</div>
-                    <div class="dm-bars" id="tbl-decisions"></div>
+            <div class="dm-stats">
+                <div class="dm-stat">
+                    <span class="dm-stat-label">Total checks</span>
+                    <span class="dm-stat-value num" id="stat-total">—</span>
                 </div>
-                <div class="dm-dist-panel">
-                    <div class="dm-dist-title">DMSS vs HMADS agreement</div>
-                    <div class="dm-bars" id="tbl-agreement"></div>
+                <div class="dm-stat dm-tone-err">
+                    <span class="dm-stat-label">Blocked</span>
+                    <span class="dm-stat-value num" id="stat-blocked">—</span>
+                </div>
+                <div class="dm-stat dm-tone-warn">
+                    <span class="dm-stat-label">Needs approval</span>
+                    <span class="dm-stat-value num" id="stat-approval">—</span>
+                </div>
+                <div class="dm-stat">
+                    <span class="dm-stat-label">Decided by</span>
+                    <span class="dm-stat-value" id="stat-decided">—</span>
                 </div>
             </div>
 
             <div class="dm-activity-head">
-                <span class="dm-dist-title">Activity</span>
+                <span class="dm-section-label">Activity</span>
                 <span class="dm-activity-count" id="dmss-events-count"></span>
             </div>
             <div class="sf-table-wrap">
                 <table class="sf-table dm-events" id="tbl-events">
                     <thead>
                         <tr>
-                            <th>When</th><th>Tool</th><th>Final</th><th>Decided by</th>
-                            <th>Model</th><th>Agreement</th><th>Fallback</th>
-                            <th>Disposition</th><th>Fingerprint</th><th class="dm-col-go"><span class="sr-only">Details</span></th>
+                            <th>When</th><th>Agent</th><th>Command</th><th>HMADS</th><th>DMSS</th>
+                            <th>Verdict</th><th class="dm-col-go"><span class="sr-only">Details</span></th>
                         </tr>
                     </thead>
                     <tbody id="tbl-events-body">
-                        <tr><td colspan="10" class="sf-empty-cell">Loading…</td></tr>
+                        <tr><td colspan="7" class="sf-empty-cell">Loading…</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -549,5 +603,5 @@
 </div>
 
 {% include 'partials/dmss/activity-modal.html' %}
-<script src="{{ url_for('static', filename='js/safety.js') }}?v=14"></script>
+<script src="{{ url_for('static', filename='js/safety.js') }}?v=15"></script>
 {% endblock %}

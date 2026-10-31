@@ -7,6 +7,7 @@ from flask import Blueprint, jsonify, request
 
 from backend.tools.lib.model_routing_contracts import ContractValidationError, parse_capabilities
 from models.db import db
+from models.mixins.models import LEGACY_MODEL_TYPES, MODEL_TYPES, normalize_model_type
 
 _logger = logging.getLogger(__name__)
 
@@ -62,10 +63,10 @@ def api_create_model():
             }
         ), 400
 
-    # Type is descriptive locality metadata only; retain legacy values without
-    # allowing it to determine endpoint, protocol, or authentication behavior.
-    if not isinstance(data["type"], str) or not data["type"].strip():
-        return jsonify({"success": False, "error": "type must be descriptive text"}), 400
+    # A model is a chat LLM or a decision model; legacy locality values read as LLM.
+    if data["type"] not in MODEL_TYPES + LEGACY_MODEL_TYPES:
+        return jsonify({"success": False, "error": f"type must be one of: {', '.join(MODEL_TYPES)}"}), 400
+    data["type"] = normalize_model_type(data["type"])
 
     if "base_url" in data or "api_key" in data:
         return jsonify({"success": False, "error": "new models must inherit endpoint and credentials from their provider"}), 400
@@ -111,7 +112,7 @@ def api_create_model():
         return jsonify({"success": False, "error": str(e)}), 409
 
     # If this is set as default, unset other defaults
-    if data.get("is_default"):
+    if data.get("is_default") and data["type"] != "decision":
         with db._connect() as conn:
             conn.execute("UPDATE llm_models SET is_default = 0")
             conn.execute("UPDATE llm_models SET is_default = 1 WHERE id = ?", (new_id,))
@@ -143,6 +144,12 @@ def api_update_model(model_id):
             data["capabilities"] = parse_capabilities(data["capabilities"]).to_dict()
         except ContractValidationError as e:
             return jsonify({"success": False, "error": str(e), "code": e.code, "path": e.path}), 400
+    if "type" in data:
+        if data["type"] not in MODEL_TYPES + LEGACY_MODEL_TYPES:
+            return jsonify({"success": False, "error": f"type must be one of: {', '.join(MODEL_TYPES)}"}), 400
+        data["type"] = normalize_model_type(data["type"])
+    if data.get("is_default") and data.get("type", model.get("type")) == "decision":
+        return jsonify({"success": False, "error": "a decision model cannot be the default chat model"}), 400
 
     # If setting as default, unset other defaults
     if data.get("is_default"):
@@ -217,6 +224,8 @@ def api_set_default_model(model_id):
     model = db.get_model_by_id(model_id)
     if not model:
         return jsonify({"error": "Model not found"}), 404
+    if model.get("type") == "decision":
+        return jsonify({"success": False, "error": "a decision model cannot be the default chat model"}), 400
 
     with db._connect() as conn:
         conn.execute("UPDATE llm_models SET is_default = 0")
@@ -234,6 +243,11 @@ def api_ping_model(model_id):
     same client agents use, so credentials, routing and the model name are all
     exercised. No fallback is allowed: a dead model must not look alive because
     another one answered.
+
+    Reachability is decided by whether the server answered at all: an HTTP 200
+    completion whose budget was consumed by reasoning still proves the endpoint,
+    the credentials and the model name are good, so it is reported as reachable
+    with a note instead of as "Unreachable".
     """
     import time
     from backend.llm_client import LLMClient
@@ -251,17 +265,23 @@ def api_ping_model(model_id):
         "timeout": min(int(model.get("timeout") or 60), 30),
         "thinking": False,
         "thinking_budget": 0,
-        "max_tokens": 16,
+        "max_tokens": 32,
         "context_window": model.get("context_window"),
         "temperature": model.get("temperature"),
         "vision_supported": bool(model.get("vision_supported")),
         "api_format": model.get("api_format", "openai"),
     }
+    # Thinking models (Groot/Qwen-style chat templates) open every reply with a
+    # reasoning block, so a tiny ping budget is gone before any content exists.
+    # Self-hosted OpenAI-compatible servers can skip that block when asked via
+    # the chat template; cloud APIs reject the field, hence provider_type gate.
+    if model.get("provider_type") == "local" and model.get("thinking"):
+        config["chat_template_kwargs"] = {"enable_thinking": False}
     started = time.monotonic()
     try:
         result = LLMClient(model_config=config, _allow_fallback=False).chat_completion(
             messages=[{"role": "user", "content": "Reply with the single word: pong"}],
-            tools=None, temperature=0.0, enable_thinking=False, max_tokens=16,
+            tools=None, temperature=0.0, enable_thinking=False, max_tokens=32,
         )
     except Exception as exc:  # network errors, bad credentials, missing CLI ...
         _logger.info("Model ping failed for %s: %s", model_id, exc)
@@ -269,6 +289,18 @@ def api_ping_model(model_id):
                         "latency_ms": int((time.monotonic() - started) * 1000)})
     latency = int((time.monotonic() - started) * 1000)
     if not result.get("success"):
+        # "answered" means the server returned HTTP 200 with a completion: it is
+        # reachable, it just spent the whole budget on reasoning. Reporting that
+        # as "Unreachable" is a false negative, so surface it as a reachable ping
+        # with an explanatory note instead.
+        if result.get("answered"):
+            return jsonify({
+                "success": True,
+                "latency_ms": latency,
+                "reply": "",
+                "reasoning_only": True,
+                "note": "Model answered, but reasoning used the whole token budget",
+            })
         detail = result.get("error_detail") or result.get("error") or result.get("error_type") or "No response"
         if isinstance(detail, dict):
             detail = detail.get("message") or json.dumps(detail)

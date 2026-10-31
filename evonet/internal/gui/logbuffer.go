@@ -10,11 +10,17 @@ import (
 // cap is exceeded the oldest lines are dropped so memory use stays bounded.
 const maxLines = 1000
 
+// maxDisplayedLines bounds how many retained lines are pushed to the RichText
+// view. Fyne re-lays-out the whole text on every refresh and that cost grows
+// super-linearly (measured on macOS: ~4 ms for 250 lines, ~58 ms for 1000), so
+// rendering the full backlog at flush rate saturated the main goroutine and
+// froze the window once the buffer had filled up.
+const maxDisplayedLines = 250
+
 // flushInterval bounds how long a burst of log writes may be coalesced before
-// the accumulated text is handed to the display. It matches the cadence of the
-// previous fixed ticker (100 ms), so the maximum UI latency is unchanged even
-// though no timer runs while the writer is idle.
-const flushInterval = 100 * time.Millisecond
+// the accumulated text is handed to the display. A shorter window buys no
+// visible responsiveness, because every flush costs a full text layout.
+const flushInterval = 200 * time.Millisecond
 
 // logBuffer is a concurrency-safe, fixed-capacity line buffer. It holds no
 // reference to any GUI toolkit, which keeps the batching logic testable on
@@ -53,7 +59,11 @@ func (b *logBuffer) snapshot() (string, bool) {
 	if !b.dirty {
 		return "", false
 	}
-	text := strings.Join(b.lines, "\n")
+	lines := b.lines
+	if len(lines) > maxDisplayedLines {
+		lines = lines[len(lines)-maxDisplayedLines:]
+	}
+	text := strings.Join(lines, "\n")
 	b.dirty = false
 	return text, true
 }
@@ -65,6 +75,44 @@ func (b *logBuffer) clear() {
 	defer b.mu.Unlock()
 	b.lines = nil
 	b.dirty = false
+}
+
+// renderGate coalesces work handed to the UI thread. At most one render may be
+// pending at a time; while one is pending, newer snapshots simply replace the
+// text that the pending render will draw. This keeps the main-goroutine queue
+// bounded no matter how far the UI thread falls behind: without it every flush
+// queued another closure carrying a full copy of the log (up to maxLines).
+//
+// It holds no reference to the toolkit, so it is unit-testable on every
+// platform, including headless CI.
+type renderGate struct {
+	mu      sync.Mutex
+	latest  string
+	pending bool
+}
+
+// offer records text as the snapshot a pending render must draw. It reports
+// whether the caller has to schedule a render; false means a render is already
+// pending and will pick this snapshot up.
+func (g *renderGate) offer(text string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.latest = text
+	if g.pending {
+		return false
+	}
+	g.pending = true
+	return true
+}
+
+// take returns the newest snapshot and clears the pending flag. It is called on
+// the UI thread, immediately before drawing. Offers that arrive after take
+// schedule a fresh render, so no snapshot is ever dropped.
+func (g *renderGate) take() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.pending = false
+	return g.latest
 }
 
 // logFlusher owns the single goroutine that batches buffered lines and passes

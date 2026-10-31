@@ -8,9 +8,9 @@ its exact existing behaviour.
 
 Only a small, versioned policy packet is sent to a provider.  In particular no
 agent context, environment values, credentials, or conversation data leaves this
-process.  The provider endpoint is ordinary admin configuration: it is stored and
-returned verbatim by the admin settings surface, while the telemetry and health
-surfaces stay provider-neutral and never echo it.
+process.  DMSS references a registered *decision* model; the endpoint and
+credentials come from that model's provider, and the telemetry and health
+surfaces stay provider-neutral and never echo them.
 """
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ import hashlib
 import json
 import logging
 import math
-import os
 import re
 import socket
 import time
@@ -34,23 +33,37 @@ logger = logging.getLogger(__name__)
 POLICY_VERSION = "decim-v1"
 SCOPED_TOOL_TYPES = frozenset({"bash", "python"})
 VALID_MODES = frozenset({"off", "shadow", "enforce"})
-VALID_PROVIDERS = frozenset({"systemone"})
 VALID_CHOICES = frozenset({"allow", "review", "block"})
+# Protocol adapters DMSS can speak; a selected model's provider must use one.
+DMSS_ADAPTER_KEYS = frozenset({"systemone.questions.v1"})
 MAX_RESPONSE_BYTES = 64 * 1024
 
 # Obvious secret-bearing markers.  When any of these is present the payload is
 # *not* sent to a provider (redaction could change executable semantics), and the
 # caller falls back to deterministic safety with reason ``sensitive_payload``.
+#
+# The name of a shell credential variable is an *identifier*, not a bare keyword:
+# ``PGPASSWORD=``, ``MYSQL_PWD=``, ``NPM_TOKEN=``, ``DOCKER_PASSWORD=``,
+# ``AWS_SECRET_ACCESS_KEY=``.  A ``\b`` anchor before the keyword never fires on
+# those (the boundary sits before ``PG``), so identifier characters are allowed
+# on both sides of it.  Over-matching is safe here by construction: a false
+# positive only routes the payload to the deterministic checker instead of the
+# provider, whereas a false negative ships a live secret to a third party.
 _SECRET_PATTERN = re.compile(
-    r"(?ix)(?:\b(?:api[_-]?key|token|password|secret|authorization)\b\s*(?:=|:)\s*|"
-    r"\b(?:sk|ghp|github_pat)_[a-z0-9_-]{12,}|-----BEGIN [A-Z ]+PRIVATE KEY-----)"
+    r"(?ix)(?:"
+    r"(?<![a-z0-9])[a-z0-9_.-]*(?:api[_-]?key|token|password|passwd|pwd|secret|"
+    r"authorization|credential)[a-z0-9_.-]*\s*(?:=|:)\s*"
+    r"|\b(?:sk|ghp|gho|github_pat|glpat|npm|xox[baprs])[_-][a-z0-9_-]{12,}"
+    r"|-----BEGIN [A-Z ]+PRIVATE KEY-----"
+    r"|\b[a-z][a-z0-9+.-]*://[^\s:/@]+:[^\s@/]+@"
+    r")"
 )
 
 __all__ = [
     "POLICY_VERSION",
     "SCOPED_TOOL_TYPES",
     "VALID_MODES",
-    "VALID_PROVIDERS",
+    "DMSS_ADAPTER_KEYS",
     "DecimSettings",
     "DecimDecision",
     "DecimResolution",
@@ -75,16 +88,19 @@ class DecimSettings:
 
     enabled: bool = False
     mode: Literal["off", "shadow", "enforce"] = "off"
-    provider: str = "systemone"
-    # Provider decision endpoint URL.  Empty means "not configured here" — the
-    # adapter falls back to its environment value.
-    provider_endpoint: str = ""
+    # Registry id of the decision model DMSS consults.  Its provider owns the
+    # endpoint, credentials and protocol adapter.  Empty means unconfigured.
+    model_id: str = ""
     request_timeout_ms: int = 1500
     minimum_confidence: float = 0.90
     max_payload_chars: int = 12000
     circuit_breaker_failures: int = 3
     circuit_breaker_cooldown_seconds: int = 60
     record_enforce_events: bool = False
+    # When true, HMADS still scores every scoped command in enforce mode and its
+    # verdict can only raise (never lower) the DMSS severity.  Off by default so
+    # the model-first design documented in the release notes stays the default.
+    hmads_floor: bool = False
     retention_days: int = 30
 
 
@@ -124,8 +140,12 @@ class DecimSafetyProvider(Protocol):
 
     key: str
 
-    def decide(self, packet: dict[str, Any], settings: DecimSettings) -> DecimDecision:
-        """Return a normalized decision or raise a provider/transport error."""
+    def decide(self, packet: dict[str, Any], settings: DecimSettings, route: Any) -> DecimDecision:
+        """Return a normalized decision or raise a provider/transport error.
+
+        ``route`` is the model's ``ResolvedModelRoute``: endpoint and
+        credentials come from the registry, never from DMSS settings.
+        """
 
 
 class DecimProviderError(RuntimeError):
@@ -165,11 +185,8 @@ def _parse_settings(values: dict[str, Any], *, strict: bool) -> DecimSettings:
     """Parse settings from persistence or an administrative API payload."""
     defaults = DecimSettings()
     mode = str(values.get("mode", defaults.mode))
-    provider = str(values.get("provider", defaults.provider))
     if mode not in VALID_MODES:
         raise ValueError("mode must be one of off, shadow, enforce")
-    if provider not in VALID_PROVIDERS:
-        raise ValueError("provider is not registered")
     try:
         timeout = int(values.get("request_timeout_ms", defaults.request_timeout_ms))
         payload = int(values.get("max_payload_chars", defaults.max_payload_chars))
@@ -187,24 +204,22 @@ def _parse_settings(values: dict[str, Any], *, strict: bool) -> DecimSettings:
     enabled = _as_bool(values.get("enabled", defaults.enabled), defaults.enabled)
     record_events = _as_bool(values.get("record_enforce_events", defaults.record_enforce_events),
                              defaults.record_enforce_events)
-    provider_endpoint = str(values.get("provider_endpoint", defaults.provider_endpoint) or "")
+    floor = _as_bool(values.get("hmads_floor", defaults.hmads_floor), defaults.hmads_floor)
+    model_id = str(values.get("model_id", defaults.model_id) or "").strip()
     if strict:
         for name, raw in (("enabled", values.get("enabled", enabled)),
-                          ("record_enforce_events", values.get("record_enforce_events", record_events))):
+                          ("record_enforce_events", values.get("record_enforce_events", record_events)),
+                          ("hmads_floor", values.get("hmads_floor", floor))):
             if not isinstance(raw, (bool, str)):
                 raise ValueError(f"{name} must be a boolean")
-        if not isinstance(values.get("provider_endpoint", provider_endpoint), str):
-            raise ValueError("provider_endpoint must be a string")
-        if provider_endpoint:
-            parsed_endpoint = urlparse(provider_endpoint)
-            if parsed_endpoint.scheme not in {"http", "https"} or not parsed_endpoint.netloc:
-                raise ValueError("provider_endpoint must be an absolute http(s) URL")
+        if not isinstance(values.get("model_id", model_id), str):
+            raise ValueError("model_id must be a string")
     return DecimSettings(
-        enabled=enabled, mode=mode, provider=provider, provider_endpoint=provider_endpoint,
+        enabled=enabled, mode=mode, model_id=model_id,
         request_timeout_ms=timeout, minimum_confidence=confidence,
         max_payload_chars=payload, circuit_breaker_failures=failures,
         circuit_breaker_cooldown_seconds=cooldown, retention_days=retention,
-        record_enforce_events=record_events,
+        record_enforce_events=record_events, hmads_floor=floor,
     )
 
 
@@ -212,20 +227,19 @@ def load_decim_settings() -> DecimSettings:
     """Load and validate public Decim operational settings.
 
     Invalid persisted values safely disable model calls rather than causing an
-    execution-path failure. The provider endpoint is plain configuration and is
-    returned verbatim by the admin settings surface.
+    execution-path failure.
     """
     raw = {
         "enabled": _setting("decim_safety.enabled", "0"),
         "mode": _setting("decim_safety.mode", "off"),
-        "provider": _setting("decim_safety.provider", "systemone"),
-        "provider_endpoint": _setting("decim_safety.provider_endpoint", ""),
+        "model_id": _setting("decim_safety.model_id", ""),
         "request_timeout_ms": _setting("decim_safety.request_timeout_ms", "1500"),
         "minimum_confidence": _setting("decim_safety.minimum_confidence", "0.90"),
         "max_payload_chars": _setting("decim_safety.max_payload_chars", "12000"),
         "circuit_breaker_failures": _setting("decim_safety.circuit_breaker_failures", "3"),
         "circuit_breaker_cooldown_seconds": _setting("decim_safety.circuit_breaker_cooldown_seconds", "60"),
         "record_enforce_events": _setting("decim_safety.record_enforce_events", "0"),
+        "hmads_floor": _setting("decim_safety.hmads_floor", "0"),
         "retention_days": _setting("decim_safety.retention_days", "30"),
     }
     try:
@@ -243,14 +257,14 @@ def validate_decim_settings(values: dict[str, Any]) -> DecimSettings:
 _PERSISTED_SETTING_KEYS = (
     ("enabled", lambda s: "1" if s.enabled else "0"),
     ("mode", lambda s: s.mode),
-    ("provider", lambda s: s.provider),
-    ("provider_endpoint", lambda s: s.provider_endpoint),
+    ("model_id", lambda s: s.model_id),
     ("request_timeout_ms", lambda s: str(s.request_timeout_ms)),
     ("minimum_confidence", lambda s: str(s.minimum_confidence)),
     ("max_payload_chars", lambda s: str(s.max_payload_chars)),
     ("circuit_breaker_failures", lambda s: str(s.circuit_breaker_failures)),
     ("circuit_breaker_cooldown_seconds", lambda s: str(s.circuit_breaker_cooldown_seconds)),
     ("record_enforce_events", lambda s: "1" if s.record_enforce_events else "0"),
+    ("hmads_floor", lambda s: "1" if s.hmads_floor else "0"),
     ("retention_days", lambda s: str(s.retention_days)),
 )
 
@@ -315,6 +329,28 @@ def _coerce_probability(value: Any) -> float | None:
     return prob
 
 
+def _preferred_reported_confidence(confidence: Any, answer_confidence: Any) -> Any:
+    """Pick the provider field that means "probability of the reported answer".
+
+    Not every provider defines ``confidence`` the same way.  Laya's ``confidence``
+    is normalized Shannon entropy (``1 - H/log k``), which is a *different scale*
+    from a choice probability: for a three-option question it only reaches ``>=
+    0.90`` when ``max(p)`` is already about ``0.98``, so gating on it makes the
+    provider abstain on nearly every decision while still looking healthy.  The
+    same response carries ``answer_confidence``, documented by Laya as exactly
+    ``max(p)`` and as the field its own ``min_confidence`` gate is defined
+    against.
+
+    When a response offers ``answer_confidence`` it therefore *replaces*
+    ``confidence`` as the reported signal instead of being added to it: taking
+    the minimum of both would let the differently-scaled entropy number dominate.
+    Both fields still pass through the selected-choice minimum below, so a
+    provider cannot inflate either one above its own distribution.
+    """
+    calibrated = _coerce_probability(answer_confidence)
+    return answer_confidence if calibrated is not None else confidence
+
+
 def _conservative_confidence(reported: Any, probabilities: Any, choice: str,
                              selected_probability: Any) -> float:
     """Compute a conservative confidence from any combination of signals.
@@ -333,8 +369,11 @@ def _conservative_confidence(reported: Any, probabilities: Any, choice: str,
             values.append(prob)
             if key == choice:
                 selected = prob
-        # A coherent distribution must not sum beyond 1 (allow tiny rounding).
-        if values and sum(values) > 1.0 + 1e-6:
+        # A coherent distribution must not sum beyond 1.  Providers round the
+        # per-option values before serialising (Laya reports 4 decimal places),
+        # so three options can legitimately sum to 1.0001: allow for accumulated
+        # rounding instead of rejecting a valid distribution.
+        if values and sum(values) > 1.0 + 1e-3:
             raise DecimProviderError("invalid_response")
     reported_value = _coerce_probability(reported)
     candidates = [value for value in (reported_value, selected) if value is not None]
@@ -356,6 +395,29 @@ def _parse_reason(answer: dict[str, Any]) -> str | None:
     return reason.strip()[:MAX_REASON_CHARS]
 
 
+def _response_state_was_truncated(data: dict[str, Any]) -> bool:
+    """Report whether the provider had to cut the state before deciding.
+
+    A decision model only sees the tokens that fit its budget, and the models we
+    target truncate the *right* side of a string state: the tail is what is
+    dropped.  For a shell command the destructive part is very often the last
+    thing in the script, so a truncated state can be answered ``allow`` purely
+    because the dangerous tail was never read.  Confidently deciding on a
+    partial payload is worse than not deciding at all, so this is surfaced as a
+    provider failure and the caller falls back to deterministic safety.
+
+    ``usage`` is optional: providers that report nothing keep their existing
+    behaviour, and only an explicit truncation fact triggers abstention.
+    """
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        return False
+    dropped = usage.get("state_tokens_dropped")
+    if isinstance(dropped, int) and not isinstance(dropped, bool) and dropped > 0:
+        return True
+    return usage.get("truncated") is True
+
+
 def _parse_decision_answer(data: Any) -> tuple[str, float, str | None, str | None]:
     """Parse a SystemOne/Nimble-style typed choice response.
 
@@ -364,6 +426,10 @@ def _parse_decision_answer(data: Any) -> tuple[str, float, str | None, str | Non
     """
     if not isinstance(data, dict):
         raise DecimProviderError("invalid_response")
+    # Checked before the answer is read: a choice made from a partial state is
+    # not evidence about the payload we actually asked about.
+    if _response_state_was_truncated(data):
+        raise DecimProviderError("truncated_state")
     answers = data.get("answers")
     if not isinstance(answers, dict):
         raise DecimProviderError("invalid_response")
@@ -376,7 +442,7 @@ def _parse_decision_answer(data: Any) -> tuple[str, float, str | None, str | Non
         raise DecimProviderError("invalid_response")
 
     confidence = _conservative_confidence(
-        answer.get("confidence"),
+        _preferred_reported_confidence(answer.get("confidence"), answer.get("answer_confidence")),
         answer.get("probabilities") or answer.get("candidates"),
         choice,
         answer.get("probability"),
@@ -399,26 +465,19 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 class SystemOneDecisionProvider:
-    """Adapter for the currently available SystemOne decision endpoint.
+    """Adapter for decision models served over ``systemone.questions.v1``.
 
-    Internally this targets the deployment's decision model.  The endpoint and
-    model identity are private deployment configuration and are never exposed as
-    part of the public Decim Safety contract.
+    The endpoint and credentials come from the selected model's provider route;
+    they are private registry configuration and are never exposed as part of the
+    public Decim Safety contract.
     """
 
-    key = "systemone"
+    key = "systemone.questions.v1"
 
-    def __init__(self, endpoint: str | None = None, *, transport=None):
-        self._endpoint_override = endpoint
+    def __init__(self, *, transport=None):
         self._transport = transport
 
-    @property
-    def endpoint(self) -> str:
-        if self._endpoint_override is not None:
-            return self._endpoint_override
-        return os.getenv("DECIM_SAFETY_SYSTEMONE_ENDPOINT", "")
-
-    def _build_request(self, packet: dict[str, Any], endpoint: str) -> Request:
+    def _build_request(self, packet: dict[str, Any], endpoint: str, api_key: str = "") -> Request:
         body = json.dumps({
             "state": packet["requested_code"],
             "context": {
@@ -439,9 +498,10 @@ class SystemOneDecisionProvider:
                 }
             },
         }, separators=(",", ":")).encode()
-        return Request(endpoint, data=body,
-                       headers={"Content-Type": "application/json", "Accept": "application/json"},
-                       method="POST")
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        return Request(endpoint, data=body, headers=headers, method="POST")
 
     def _read_response(self, request: Request, settings: DecimSettings) -> bytes:
         opener = self._transport or build_opener(_NoRedirect)
@@ -459,15 +519,14 @@ class SystemOneDecisionProvider:
         except Exception:
             raise DecimProviderError("provider_error") from None
 
-    def decide(self, packet: dict[str, Any], settings: DecimSettings) -> DecimDecision:
-        # The admin-configured endpoint (stored secret) wins; fall back to the
-        # deployment environment value when none is configured in settings.
-        endpoint = (getattr(settings, "provider_endpoint", "") or "").strip() or self.endpoint
+    def decide(self, packet: dict[str, Any], settings: DecimSettings, route: Any) -> DecimDecision:
+        endpoint = (route.provider.endpoint or "").strip()
         parsed = urlparse(endpoint)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise DecimProviderError("provider_unconfigured")
         started = time.monotonic()
-        raw = self._read_response(self._build_request(packet, endpoint), settings)
+        request = self._build_request(packet, endpoint, route.credentials.get("api_key", ""))
+        raw = self._read_response(request, settings)
         if len(raw) > MAX_RESPONSE_BYTES:
             raise DecimProviderError("response_too_large")
         try:
@@ -478,8 +537,8 @@ class SystemOneDecisionProvider:
         return DecimDecision(
             decision=choice,
             confidence=confidence,
-            model_id=model_id,
-            provider_key=self.key,
+            model_id=model_id or route.model_id,
+            provider_key=route.provider.provider_id,
             policy_version=POLICY_VERSION,
             correlation_id=packet.get("correlation_id"),
             latency_ms=int((time.monotonic() - started) * 1000),
@@ -517,13 +576,40 @@ class DecimCircuitBreaker:
         return "open" if self._opened_at is not None else "closed"
 
 
+def _registry_route(model_id: str):
+    from models.db import db
+    return db.resolve_model_route(model_id)
+
+
 class DecimSafetyResolver:
-    """Resolve an explicit Decim decision or a typed fallback reason."""
+    """Resolve an explicit Decim decision or a typed fallback reason.
+
+    ``providers`` maps a protocol adapter key to its client; the selected
+    model's provider route decides which one is used.
+    """
 
     def __init__(self, providers: dict[str, DecimSafetyProvider] | None = None,
-                 breaker: DecimCircuitBreaker | None = None):
-        self.providers = providers or {"systemone": SystemOneDecisionProvider()}
+                 breaker: DecimCircuitBreaker | None = None, route_resolver=None):
+        self.providers = providers or {key: SystemOneDecisionProvider() for key in DMSS_ADAPTER_KEYS}
         self.breaker = breaker or DecimCircuitBreaker()
+        self._route_resolver = route_resolver or _registry_route
+
+    def decide(self, packet: dict[str, Any], settings: DecimSettings) -> DecimDecision:
+        """Call the selected model once, without circuit-breaker bookkeeping.
+
+        Raises ``provider_unconfigured`` when no usable decision model is
+        selected: unknown or disabled model/provider, or a protocol DMSS cannot
+        speak.
+        """
+        if not settings.model_id:
+            raise DecimProviderError("provider_unconfigured")
+        route = self._route_resolver(settings.model_id)
+        if route is None or not route.enabled or not route.provider.enabled:
+            raise DecimProviderError("provider_unconfigured")
+        provider = self.providers.get(route.provider.adapter_key.value)
+        if provider is None:
+            raise DecimProviderError("provider_unconfigured")
+        return provider.decide(packet, settings, route)
 
     def resolve(self, code: str, tool_type: str, agent_context: dict[str, Any] | None = None,
                 settings: DecimSettings | None = None) -> DecimResolution:
@@ -532,15 +618,15 @@ class DecimSafetyResolver:
             return DecimResolution(False, fallback_reason="disabled")
         if tool_type not in SCOPED_TOOL_TYPES:
             return DecimResolution(False, fallback_reason="out_of_scope")
-        if not settings.provider or settings.provider not in self.providers:
+        if not settings.model_id:
             return DecimResolution(False, fallback_reason="provider_unconfigured")
         if not self.breaker.permits(settings):
             return DecimResolution(False, fallback_reason="circuit_open")
         try:
             packet = build_policy_packet(code, tool_type, _execution_boundary(agent_context),
                                          settings.max_payload_chars)
-            decision = self.providers[settings.provider].decide(packet, settings)
-            if decision.provider_key != settings.provider or decision.policy_version != POLICY_VERSION:
+            decision = self.decide(packet, settings)
+            if decision.policy_version != POLICY_VERSION:
                 raise DecimProviderError("invalid_response")
             if decision.decision not in VALID_CHOICES:
                 raise DecimProviderError("invalid_response")

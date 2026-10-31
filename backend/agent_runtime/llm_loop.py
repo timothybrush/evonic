@@ -241,75 +241,22 @@ def _collect_parallel_tool_results(parallel_jobs, pool, stop_event):
     return results
 
 
+def _tool_batch_echo_guard():
+    """Lazy access to the runtime's deferred-echo batch helpers."""
+    from backend.agent_runtime import runtime as _runtime
+    return _runtime.begin_tool_batch, _runtime.end_tool_batch
+
+
 def _sanitize_tool_call_pairs(messages: List[Dict[str, Any]]) -> bool:
-    """Repair orphaned tool_calls / tool messages in-place before sending to the API.
+    """Repair orphaned tool_calls / tool messages in-place before sending.
 
-    The provider rejects (HTTP 400) any history where an assistant message with
-    `tool_calls` is not immediately followed by a `tool` response for every
-    `tool_call_id`, or where a `tool` message has no declaring assistant. This can
-    slip through history reconstruction (SQLite-fallback path, prefetch, or live
-    edge cases). Mirror the proven repair in models/chatlog.py:
-
-    1. Inject a synthetic error `tool` response for any declared tool_call_id that
-       has no matching response.
-    2. Drop `tool` messages whose tool_call_id was never declared (orphaned) or is
-       a duplicate response.
-
-    Idempotent — a no-op on well-formed histories. Returns True if it changed
-    `messages`, so callers can gate a retry on "something was actually repaired".
+    Thin wrapper over ``active_context.repair_tool_pairs`` so the preflight
+    repair and the request-budget repair are one deterministic implementation
+    (see that docstring for the invariants). Returns True if ``messages`` was
+    changed.
     """
-    repaired = False
-    out: List[Dict[str, Any]] = []
-    i = 0
-    n = len(messages)
-    declared_ids: set = set()
-    responded_ids: set = set()
-    while i < n:
-        msg = messages[i]
-        if msg.get('role') == 'assistant' and msg.get('tool_calls'):
-            tc_ids = [tc.get('id') for tc in msg.get('tool_calls', []) if tc.get('id')]
-            declared_ids.update(tc_ids)
-            out.append(msg)
-            # Collect the contiguous run of tool responses that follow.
-            j = i + 1
-            seen_here: set = set()
-            while j < n and messages[j].get('role') == 'tool':
-                _tcid = messages[j].get('tool_call_id', '')
-                if _tcid in tc_ids and _tcid not in seen_here and _tcid not in responded_ids:
-                    seen_here.add(_tcid)
-                    responded_ids.add(_tcid)
-                    out.append(messages[j])
-                else:
-                    # Orphaned or duplicate tool response — drop it.
-                    repaired = True
-                j += 1
-            # Inject synthetic responses for any tool_call_id left unanswered.
-            for _mid in tc_ids:
-                if _mid not in seen_here:
-                    out.append({
-                        'role': 'tool',
-                        'tool_call_id': _mid,
-                        'content': '{"error": "Tool execution was interrupted before completion."}',
-                    })
-                    responded_ids.add(_mid)
-                    repaired = True
-            i = j
-        elif msg.get('role') == 'tool':
-            # A tool message not immediately preceded by its declaring assistant.
-            _tcid = msg.get('tool_call_id', '')
-            if _tcid in declared_ids and _tcid not in responded_ids:
-                responded_ids.add(_tcid)
-                out.append(msg)
-            else:
-                repaired = True  # orphaned or duplicate — drop
-            i += 1
-        else:
-            out.append(msg)
-            i += 1
-
-    if repaired:
-        messages[:] = out
-    return repaired
+    from backend.agent_runtime.active_context import repair_tool_pairs
+    return repair_tool_pairs(messages)
 
 
 def _persist_agent_state_split(ms, agent_id, session_id, db_agent_id=None):
@@ -348,7 +295,6 @@ def _persist_agent_state_split(ms, agent_id, session_id, db_agent_id=None):
         'plan_file': data.get('plan_file'),
         'states': data.get('states', {}),
         'auto_trivial': data.get('auto_trivial', False),
-        'atg': data.get('atg'),
         'cmp': data.get('cmp'),
     })
     db.upsert_session_state(session_id, json.dumps(session_data), agent_id=agent_id)
@@ -539,7 +485,7 @@ def run_tool_loop(agent: Dict[str, Any],
         """Return whether a tool represents implementation work."""
         return tool_name not in _READ_ONLY_TOOLS and tool_name not in {
             'set_mode', 'save_plan', 'update_tasks', 'state',
-            'compile_task_graph', 'switch_path', 'new_path',
+            'switch_path', 'new_path',
             'use_skill', 'unload_skill', 'remember', 'recall',
         }
 
@@ -949,14 +895,6 @@ def run_tool_loop(agent: Dict[str, Any],
     if agent_model_config and session_id:
         llm.session_id = session_id
 
-    # ATG: give the compile_task_graph builtin access to the resolved LLM.
-    # Compiler calls acquire llm_lock per call (same discipline as the main call).
-    if agent_context.get('enable_atg'):
-        agent_context['_atg_runtime'] = {
-            'llm': llm, 'llm_lock': llm_lock,
-            'llm_log_path': llm_log_path, 'tools': tools,
-        }
-
     # Resolve thinking budget: only active when explicitly set per-model (thinking_budget > 0).
     # Models with thinking_budget=0 have no cap — intended for large models that benefit
     # from extended reasoning. Set thinking_budget per-model in Settings for small models.
@@ -1051,6 +989,7 @@ def run_tool_loop(agent: Dict[str, Any],
     _injection_count = 0  # total injections in this loop run (capped to prevent infinite loops)
     # Track whether we've already done a tool-call iteration (kept for future use).
     _had_tool_call_iteration = False
+    _protocol_repair_attempts = 0  # one repair retry for invalid tool protocol
 
     def _get_last_user_message(msgs: list) -> Optional[dict]:
         """Return the last user-role message in the list, or None."""
@@ -1101,68 +1040,6 @@ def run_tool_loop(agent: Dict[str, Any],
     # to avoid redundant DB reads in the loop iterations and tool result scans.
     _agent_ig_config = _get_agent_config_ig(agent_id)
 
-    # ── ATG branch point ──────────────────────────────────────────────────
-    # When the agent has a compiled task graph awaiting execution, run it
-    # first: the executor front-loads the tool work (parallel waves, per-node
-    # state) and hands a summary to this loop, whose next LLM call composes
-    # the final answer. Any failure degrades to the plain loop below —
-    # this block never replaces the loop's exit paths.
-    _atg_ms = agent_context.get('agent_state')
-    if (agent_context.get('enable_atg') and _atg_ms is not None
-            and not getattr(_atg_ms, 'auto_trivial', False)
-            and _atg_ms.mode == 'execute'
-            and isinstance(getattr(_atg_ms, 'atg', None), dict)
-            and _atg_ms.atg.get('status') in ('compiled', 'executing')):
-        _atg_outcome = None
-        try:
-            from backend.agent_runtime import atg as _atg_pkg
-            _atg_outcome = _atg_pkg.run_dag_execution(
-                agent=agent, agent_context=agent_context, ms=_atg_ms,
-                stop_event=stop_event, builtin_exec=builtin_exec,
-                real_exec=real_exec, chatlog=chatlog, tool_trace=tool_trace,
-                timeline=timeline, session_id=session_id,
-                persist_cb=lambda: _persist_agent_state_split(
-                    _atg_ms, agent_id, session_id, db_agent_id))
-        except Exception:
-            _logger.exception("ATG execution crashed — falling back to plain loop")
-        if _atg_outcome is not None:
-            _atg_ms.sync_completed_atg_tasks()
-            try:
-                _persist_agent_state_split(_atg_ms, agent_id, session_id, db_agent_id)
-            except Exception:
-                _logger.exception("ATG state persist failed")
-            if _atg_outcome.stopped:
-                stop_event.clear()
-                _logger.info("Stop signal received during ATG execution for session %s", session_id)
-                stop_msg = "Agent stopped by user request."
-                _atg_stop_dur = round(time.time() - _loop_start_time, 1)
-                message_id = _message_id(db.add_chat_message(
-                    session_id, 'assistant', stop_msg, agent_id=db_agent_id,
-                    metadata={"timeline": timeline, "stopped": True,
-                              "thinking_duration": _atg_stop_dur},
-                ))
-                chatlog.append({'type': 'final', 'session_id': session_id, 'content': stop_msg,
-                                'metadata': {'stopped': True, 'thinking_duration': _atg_stop_dur},
-                                'message_id': message_id})
-                chatlog.append({'type': 'turn_end', 'session_id': session_id,
-                                'thinking_duration': _atg_stop_dur})
-                event_stream.emit('final_answer', {
-                    'agent_id': agent_id, 'session_id': session_id,
-                    'external_user_id': external_user_id, 'channel_id': channel_id,
-                    'answer': stop_msg, 'tool_trace': tool_trace, 'timeline': timeline,
-                })
-                return stop_msg, tool_trace, timeline
-            if _atg_outcome.summary_for_llm:
-                # user role with [SYSTEM] prefix (same pattern as force-stop
-                # injection): strict chat templates (e.g. evomodel on llama.cpp)
-                # reject system messages that are not in leading position.
-                messages.append({"role": "user",
-                                 "content": "[SYSTEM] " + _atg_outcome.summary_for_llm})
-            # Stats land in the final assistant message metadata (timeline) so
-            # A/B evaluation and the UI can read per-run ATG figures.
-            timeline.append({"type": "atg_stats", "status": _atg_outcome.status,
-                             **_atg_outcome.stats})
-
     while _iteration < max_tool_iterations:
         _llm_call_count += 1
         # Hard cap on total LLM API calls (safety net for non-tool loops like
@@ -1212,7 +1089,6 @@ def run_tool_loop(agent: Dict[str, Any],
         if ms is not None:
             state_msg = {"role": "system",
                          "content": ms.render(agent_id=agent_id,
-                                              atg_enabled=bool(agent_context.get('enable_atg')),
                                               cmp_enabled=bool(agent_context.get('enable_cmp')),
                                               agent_name=agent_context.get('agent_name')
                                                          or agent_context.get('name'),
@@ -1395,8 +1271,57 @@ def run_tool_loop(agent: Dict[str, Any],
             **_budget_plan.metrics(),
         })
         if REQUEST_BUDGET_MODE == 'enforced' and not _budget_plan.fit:
-            _logger.error('request_budget irreducible session=%s path=%s fingerprint=%s',
-                          session_id, _request.path, _budget_plan.fingerprint)
+            _logger.error(
+                'request_budget not fit session=%s path=%s diagnostic=%s stage=%s '
+                'estimated_tokens=%d input_budget=%d capacity=%d messages=%d fingerprint=%s',
+                session_id, _request.path, _budget_plan.diagnostic, _budget_plan.stage,
+                _budget_plan.estimated_tokens, _budget_plan.input_budget,
+                _budget_plan.capacity, len(_budget_plan.messages),
+                _budget_plan.fingerprint)
+            if _budget_plan.diagnostic == 'invalid_tool_protocol':
+                # Structural tool-call defect, NOT a size problem. Saying "exceeds
+                # the safe context budget" here is a lie (live: 38k tokens against
+                # a 1M window) and sent the operator chasing the wrong symptom.
+                # plan_request already ran one deterministic repair pass on the
+                # provider-bound copy; retry once more on the live list in case
+                # projection introduced the defect.
+                if _protocol_repair_attempts == 0 and _sanitize_tool_call_pairs(messages):
+                    _protocol_repair_attempts += 1
+                    _logger.warning(
+                        'request_budget invalid_tool_protocol repaired on retry '
+                        'session=%s path=%s', session_id, _request.path)
+                    continue
+                _protocol_msg = (
+                    'LLM Error: the conversation history is in an invalid tool-call '
+                    'state (an assistant message declares tool calls whose results '
+                    'are missing, duplicated, or out of order) and the automatic '
+                    'repair pass could not fix it. This is a history defect, not a '
+                    'context-size problem. Start a fresh session with /clear, or '
+                    'send your message again to retry the repair.')
+                _proto_dur = round(time.time() - _loop_start_time, 1)
+                _logger.error(
+                    'invalid_tool_protocol unresolved session=%s path=%s '
+                    'stage=%s messages=%d', session_id, _request.path,
+                    _budget_plan.stage, len(_budget_plan.messages))
+                db.add_chat_message(session_id, 'assistant', _protocol_msg,
+                                    agent_id=db_agent_id,
+                                    metadata={'error': True,
+                                              'protocol_error': 'invalid_tool_protocol',
+                                              'timeline': timeline,
+                                              'thinking_duration': _proto_dur})
+                chatlog.append({'type': 'error', 'session_id': session_id,
+                                'content': _protocol_msg,
+                                'metadata': {'error': True,
+                                             'protocol_error': 'invalid_tool_protocol'}})
+                chatlog.append({'type': 'turn_end', 'session_id': session_id,
+                                'thinking_duration': _proto_dur})
+                event_stream.emit('final_answer', {
+                    'agent_id': agent_id, 'session_id': session_id,
+                    'external_user_id': external_user_id, 'channel_id': channel_id,
+                    'answer': _protocol_msg, 'tool_trace': tool_trace,
+                    'timeline': timeline, 'error': True,
+                })
+                return _protocol_msg, tool_trace, timeline
             return ("The current request exceeds this model's safe context budget and cannot be reduced without removing required context.", tool_trace, timeline)
         if REQUEST_BUDGET_MODE == 'enforced':
             _request = _request.derive(messages=_budget_plan.messages, tools=_budget_plan.tools,
@@ -2468,6 +2393,14 @@ def run_tool_loop(agent: Dict[str, Any],
         _had_tool_call_iteration = True
 
         # ── Hybrid tool execution: parallel for read-only, serial for writes ──
+        # Tools that echo a user-visible assistant chatlog row (e.g. send_file's
+        # attachment note) must not write it between these tool_call rows and
+        # their tool_output rows: history reconstruction would then place prose
+        # between the assistant tool_calls message and its results, which the
+        # provider rejects. begin/end brackets the batch; echoes queue in between
+        # and flush after the outputs are written.
+        _begin_tool_batch, _end_tool_batch = _tool_batch_echo_guard()
+        _begin_tool_batch(agent_id, session_id)
         # Phase 1: Parse all tool call arguments and emit 'tool_call_started'.
         _parse_failed = {}
         _tool_records = []       # [(tc, fn_name, args, pt)]
@@ -3075,6 +3008,9 @@ def run_tool_loop(agent: Dict[str, Any],
                                 'error': has_error, 'function': fn_name,
                                 **_timeline_extra})
                 tool_trace.append({"tool": fn_name, "args": args, "result": result_dict})
+                # Terminal exit mid-batch: close the echo guard so deferred
+                # assistant echoes are not left queued forever.
+                _end_tool_batch(agent_id, session_id)
                 return _finalize_gate_response(
                     str(_result_decision.get('response') or ''), 'tool_result')
 
@@ -3082,7 +3018,7 @@ def run_tool_loop(agent: Dict[str, Any],
             # push the fresh per-session snapshot. event_stream.emit only mutates its
             # in-memory buffers here; listener work is delegated to its executor.
             if fn_name in ('save_plan', 'set_mode', 'update_tasks', 'state',
-                           'compile_task_graph', 'switch_path', 'new_path'):
+                           'switch_path', 'new_path'):
                 _ms = agent_context.get('agent_state')
                 if _ms is not None:
                     _persist_agent_state_split(_ms, agent_id, session_id, db_agent_id)
@@ -3150,6 +3086,7 @@ def run_tool_loop(agent: Dict[str, Any],
                         'answer': error_msg, 'tool_trace': tool_trace, 'timeline': timeline,
                         'error': True,
                     })
+                    _end_tool_batch(agent_id, session_id)
                     return {"text": error_msg, "error": True}, tool_trace, timeline
 
             if _tool_call_window.count(_tool_call_key) >= 5 and not _tool_args_force_stop_injected:
@@ -3172,6 +3109,11 @@ def run_tool_loop(agent: Dict[str, Any],
                 _post_force_stop_tool_count = 1
 
         # The parallel pool is always cleaned up by the bounded collector.
+
+        # Batch closed: append any assistant echoes deferred while tools ran, so
+        # they land after this batch's tool_output rows.
+        if _end_tool_batch(agent_id, session_id):
+            _logger.debug('Flushed deferred chatlog echoes session=%s', session_id)
 
         # Count this as one tool iteration (what the user sees as "iterations")
         _iteration += 1

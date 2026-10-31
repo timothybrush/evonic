@@ -12,7 +12,7 @@ import logging
 import os
 import re
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 import tiktoken
 
@@ -876,8 +876,15 @@ def build_system_prompt(agent: Dict[str, Any], injected_system_vars: Dict[str, s
     return prompt
 
 
-def build_tools(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Build the OpenAI function tool list for this agent."""
+def build_tools(agent: Dict[str, Any], channel_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Build the OpenAI function tool list for this agent.
+
+    ``channel_id`` is the external channel the session runs on (None for the
+    web chat). Tools declared ``"web_only": true`` in their definition are left
+    out of the list on external channels, so the model never sees them. Tools
+    declaring ``"channels": ["web", "telegram", ...]`` are listed only on those
+    channel types ("web" is the web chat).
+    """
     tools = []
 
     # Explorer sub-agents (the Explore tool's explorers AND the KB organizer) are
@@ -910,7 +917,6 @@ def build_tools(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
         'workplace_id': agent.get('workplace_id'),
         'workplace_switch_enabled': bool(agent.get('workplace_switch_enabled')),
         'send_file_allowed_path_regex': agent.get('send_file_allowed_path_regex', ''),
-        'enable_atg': bool(agent.get('enable_atg')) and bool(agent.get('enable_agent_state')),
         'enable_cmp': bool(agent.get('enable_cmp')) and bool(agent.get('enable_agent_state')),
         'always_execute': bool(agent.get('always_execute')),
     }
@@ -975,6 +981,12 @@ def build_tools(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
     if agent.get('audio_enabled'):
         assigned_ids.add('transcribe_audio')
 
+    # ask_user_question follows the agent's setting, even if assigned by hand.
+    if agent.get('ask_user_enabled', 1):
+        assigned_ids.add('ask_user_question')
+    else:
+        assigned_ids.discard('ask_user_question')
+
     # Auto-assign monitor wherever bash is available — it is the opt-in way to
     # be notified about background processes, which only bash can start.
     if 'bash' in assigned_ids:
@@ -982,9 +994,18 @@ def build_tools(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     if assigned_ids:
         seen_fn_names = {t['function']['name'] for t in tools if t.get('function', {}).get('name')}
+        channel_type = None  # resolved lazily: only tools declaring "channels" need it
         for tool_def in tool_registry.get_all_tool_defs():
             tool_id = tool_def.get('id', '')
             fn_name = tool_def.get('function', {}).get('name', '')
+            if channel_id and tool_def.get('web_only'):
+                continue
+            if tool_def.get('channels'):
+                if channel_type is None:
+                    channel = db.get_channel(channel_id) if channel_id else None
+                    channel_type = (channel or {}).get('type', '') if channel_id else 'web'
+                if channel_type not in tool_def['channels']:
+                    continue
             # Match by namespaced id OR bare function name (backward compat)
             if tool_id in assigned_ids or fn_name in assigned_ids:
                 # One function name per agent — skip duplicates

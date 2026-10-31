@@ -132,32 +132,29 @@ def test_dmss_tester_offers_ready_to_submit_samples():
         assert f'data-sample="{sample}"' in html
     assert html.count('class="sf-tester-sample"') >= 4
     # Bumped asset versions so the new wiring/CSS is not served stale.
-    assert "js/safety.js?v=14" in html
-    assert "css/safety.css?v=15" in html
+    assert "js/safety.js?v=15" in html
+    assert "css/safety.css?v=16" in html
 
 
-def test_dmss_provider_endpoint_has_a_connectivity_test_button():
-    """The provider endpoint row exposes a Test action plus an inline verdict slot."""
+def test_dmss_decision_model_select_has_a_connectivity_test_button():
+    """DMSS picks a registered decision model (no raw endpoint) and can test it inline."""
     client = _client()
     html = client.get("/system/safety").get_data(as_text=True)
 
-    assert 'id="dc-endpoint-test"' in html
-    assert 'id="dc-endpoint-test-result"' in html
+    assert 'id="dc-model"' in html
+    assert 'id="dc-model-test"' in html
+    assert 'id="dc-model-test-result"' in html
+    assert 'id="dc-endpoint"' not in html
+    assert 'id="dc-provider"' not in html
     # The verdict is announced to assistive technology.
     assert 'role="status" aria-live="polite"' in html
-    # The Test control sits directly after the endpoint input in the same row.
-    assert html.index('id="dc-endpoint"') < html.index('id="dc-endpoint-test"')
-    assert html.index('id="dc-endpoint-test"') - html.index('id="dc-endpoint"') < 900
+    # The Test control sits directly after the model select in the same row.
+    assert html.index('id="dc-model"') < html.index('id="dc-model-test"')
+    assert html.index('id="dc-model-test"') - html.index('id="dc-model"') < 900
 
 
-def test_dmss_endpoint_is_plaintext_and_primary_buttons_are_dark_mode_readable():
-    """The endpoint remains visually readable and Save buttons retain dark-mode contrast."""
-    client = _client()
-    html = client.get("/system/safety").get_data(as_text=True)
-
-    assert 'id="dc-endpoint" class="sf-input" type="text"' in html
-    assert 'id="dc-endpoint" class="sf-input" type="password"' not in html
-
+def test_dmss_primary_buttons_are_dark_mode_readable():
+    """Save buttons retain dark-mode contrast."""
     with open(f"{app.root_path}/static/css/safety.css", encoding="utf-8") as safety_css_file:
         safety_css = safety_css_file.read()
     assert "html.dark .sf-btn-primary {\n    background: #4338ca;" in safety_css
@@ -196,20 +193,33 @@ def test_activity_modal_exposes_command_detection_and_decision_sections():
     assert 'role="dialog"' in html
     assert 'aria-modal="true"' in html
 
-    for section in ("dmss-sec-command", "dmss-sec-detection", "dmss-sec-decision", "dmss-sec-metadata"):
+    for section in ("dmss-sec-summary", "dmss-sec-command", "dmss-sec-hmads", "dmss-sec-dmss"):
         assert f'id="{section}"' in html
 
     for field in (
+        "dmss-agent", "dmss-tool-type", "dmss-occurred-at", "dmss-final-level", "dmss-decided-by",
         "dmss-command-text", "dmss-command-copy", "dmss-command-empty",
-        "dmss-detection-type", "dmss-rule-categories", "dmss-rule-verdict", "dmss-rule-score",
-        "dmss-model-decision", "dmss-model-confidence", "dmss-model-latency",
-        "dmss-agreement", "dmss-fallback-reason",
-        "dmss-final-level", "dmss-decision-source", "dmss-disposition", "dmss-mode",
-        "dmss-event-id", "dmss-occurred-at", "dmss-tool-type", "dmss-boundary",
-        "dmss-policy-version", "dmss-provider", "dmss-model-id",
-        "dmss-correlation-id", "dmss-expires-at",
+        "dmss-rule-verdict", "dmss-rule-categories", "dmss-rule-score", "dmss-rule-time",
+        "dmss-model-decision", "dmss-model-confidence", "dmss-model-latency", "dmss-model-id",
+        "dmss-event-id", "dmss-mode", "dmss-policy-version", "dmss-provider",
     ):
         assert f'id="{field}"' in html, field
+
+    # Comparison noise the operator does not need is gone.
+    for removed in ("dmss-agreement", "dmss-correlation-id", "dmss-expires-at"):
+        assert f'id="{removed}"' not in html, removed
+
+
+def test_telemetry_table_answers_who_what_and_which_engine():
+    html = _client().get("/system/safety").get_data(as_text=True)
+    head = html[html.index('id="tbl-events"'):html.index('id="tbl-events-body"')]
+    for column in ("When", "Agent", "Command", "HMADS", "DMSS", "Verdict"):
+        assert f"<th>{column}</th>" in head, column
+    for removed in ("Fingerprint", "Agreement", "Disposition", "Fallback"):
+        assert removed not in head, removed
+    for control in ("f-agent", "f-decided", "f-verdict"):
+        assert f'id="{control}"' in html, control
+    assert 'id="tbl-agreement"' not in html
 
 
 def test_activity_modal_styles_exist_and_use_theme_tokens():
@@ -227,3 +237,21 @@ def test_activity_modal_styles_exist_and_use_theme_tokens():
     html = client.get("/system/safety").get_data(as_text=True)
     assert ".detail-container {" not in html
     assert "modal-detail-container" not in html
+
+
+def test_dmss_enforce_behaviour_controls_are_exposed():
+    """The recording policy and the HMADS floor must be operable from the UI."""
+    html = _client().get("/system/safety").get_data(as_text=True)
+
+    # Fieldset that hosts the two enforce-mode switches.
+    assert "Enforce behaviour" in html
+    assert 'id="dc-record"' in html
+    assert 'id="dc-floor"' in html
+    assert 'role="switch"' in html
+    # Each switch keeps its own auto-save status slot.
+    for slot in ("dc-status-record", "dc-status-floor"):
+        assert f'id="{slot}"' in html, slot
+
+    # The recording indicator that the redesign dropped is back on the
+    # Provider KPI card.
+    assert 'id="kpi-recording"' in html

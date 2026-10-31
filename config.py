@@ -234,7 +234,7 @@ SANDBOX_BACKEND = os.getenv("SANDBOX_BACKEND", "docker").strip().lower()
 # limits (systemd-run --scope) are a follow-up.
 SANDBOX_BWRAP_ULIMIT_V_MB = _get_env_int("SANDBOX_BWRAP_ULIMIT_V_MB", 0, min_val=0, max_val=65536)
 
-# SSH backend configuration (used by sshc tool / SSHBackend)
+# SSH backend configuration (used by RemoteWorkplace / portals / SSHBackend)
 SSH_DEFAULT_TIMEOUT = _get_env_int("SSH_DEFAULT_TIMEOUT", 30, min_val=1, max_val=3600)   # seconds per command
 SSH_IDLE_TIMEOUT = _get_env_int("SSH_IDLE_TIMEOUT", 1800, min_val=1, max_val=43200)       # 30 min idle disconnect
 
@@ -338,9 +338,9 @@ TOOL_COMPRESSION_VERBOSE = _get_env_bool("RTK_VERBOSE", False)
 LONG_RUNNING_GUARD_ENABLED = _get_env_bool("LR_GUARD_DISABLED", False, invert=True)
 
 # Root filesystem scan guard -- True unless RFS_GUARD_DISABLED=1 (env var force-disables).
-# When enabled, root scans (`find /`, `tree /`) return requires_approval instead of
-# running immediately, because a full-root scan is a performance hazard that can stall
-# the turn. This guard lives OUTSIDE the safety pipeline (see backend/tools/bash.py) --
+# When enabled, root scans (`find /`, `tree /`) are auto-rejected (no approval prompt)
+# so the agent explores a narrower path instead, because a full-root scan is a
+# performance hazard that can stall the turn. This guard lives OUTSIDE the safety pipeline (see backend/tools/bash.py) --
 # it is a performance control, not a trust decision -- so the per-agent "Safety Checker"
 # toggle (safety_checker_enabled) does NOT affect it. In addition to the env var, the
 # DB setting root_fs_scan_guard_enabled can override this at runtime via the

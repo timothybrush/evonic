@@ -15,6 +15,7 @@ Endpoints:
 * ``GET  /api/admin/decim-safety/metrics``     summary + time-bucketed trend
 * ``GET  /api/admin/decim-safety/events``      paged, filtered event list
 * ``GET  /api/admin/decim-safety/events/<id>`` single event
+* ``GET  /api/admin/decim-safety/agents``      agents with recorded events
 * ``POST /api/admin/decim-safety/telemetry/clear`` audited retention reset
 """
 from __future__ import annotations
@@ -25,7 +26,6 @@ import threading
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
-from urllib.parse import urlparse
 
 from flask import Blueprint, jsonify, redirect, request, session
 
@@ -82,12 +82,18 @@ def api_decim_safety_health():
     return jsonify({
         "enabled": settings.enabled,
         "mode": settings.mode,
-        # Provider key only: this health surface never echoes the endpoint.
-        "provider": settings.provider if settings.enabled else "",
+        # Registry model id only: this health surface never echoes the endpoint.
+        "model_id": settings.model_id if settings.enabled else "",
         "circuit_state": circuit_state,
         "recording": settings.mode == "shadow" or (
             settings.mode == "enforce" and settings.record_enforce_events
         ),
+        "record_enforce_events": bool(settings.record_enforce_events),
+        "hmads_floor": bool(getattr(settings, "hmads_floor", False)),
+        # Present only when the telemetry store could not be read, so the
+        # dashboard can distinguish "no events" from "storage unavailable".
+        "telemetry_error": state.get("error"),
+        "telemetry_error_detail": state.get("error_detail"),
         "last_decision_at": state.get("last_decision_at"),
         # Aggregate timing only; never expose transport endpoint/hostname.
         "latency_ms": (summary.get("latency_ms") or {}).copy(),
@@ -103,15 +109,18 @@ def api_decim_safety_summary():
     """Aggregate statistics for the dashboard cards."""
     from backend.services import decim_safety_metrics
 
+    # 0 means "all time".
     window = _parse_positive_int(request.args.get("window_hours"),
-                                  default=24 * 7, minimum=1, maximum=24 * 365)
+                                  default=24 * 7, minimum=0, maximum=24 * 365)
     mode = request.args.get("mode")
     tool_type = request.args.get("tool_type")
     if mode not in _VALID_MODES:
         mode = None
     if tool_type not in _VALID_TOOLS:
         tool_type = None
-    return jsonify(decim_safety_metrics.summary(window, mode=mode, tool_type=tool_type))
+    agent_id = request.args.get("agent_id") or None
+    return jsonify(decim_safety_metrics.summary(window, mode=mode, tool_type=tool_type,
+                                                agent_id=agent_id))
 
 
 @decim_safety_bp.route("/api/admin/decim-safety/metrics", methods=["GET"])
@@ -158,11 +167,27 @@ def api_decim_safety_events():
         final_level = None
     unsafe_only = request.args.get("unsafe_only", "").lower() in ("1", "true", "yes")
     since = request.args.get("since") or None
+    if since is None and request.args.get("window_hours"):
+        from backend.services import decim_safety_metrics
+        window = _parse_positive_int(request.args.get("window_hours"),
+                                      default=24 * 7, minimum=0, maximum=24 * 365)
+        since = decim_safety_metrics._window_start(window)
 
     return jsonify(decim_safety_telemetry.list_events(
         limit=limit, offset=offset, mode=mode, tool_type=tool_type,
         final_level=final_level, unsafe_only=unsafe_only, since=since,
+        agent_id=request.args.get("agent_id") or None,
+        decided=request.args.get("decided_by"),
+        verdict=request.args.get("verdict"),
     ))
+
+
+@decim_safety_bp.route("/api/admin/decim-safety/agents", methods=["GET"])
+def api_decim_safety_agents():
+    """Agents with recorded events, for the telemetry agent filter."""
+    from backend.services import decim_safety_telemetry
+
+    return jsonify({"agents": decim_safety_telemetry.list_agents()})
 
 
 @decim_safety_bp.route("/api/admin/decim-safety/events/<event_id>", methods=["GET"])
@@ -222,7 +247,7 @@ _TESTER_SECRETISH_PATTERN = re.compile(
 _TESTER_FALLBACK_TEXT = {
     "payload_too_large": "Payload exceeds the configured maximum size and was not sent to the provider.",
     "sensitive_payload": "Payload looks like it contains a secret (API key/token/private key) and was not sent to the provider.",
-    "provider_unconfigured": "No provider endpoint is configured.",
+    "provider_unconfigured": "No usable decision model is selected (missing, disabled, or its provider has no endpoint).",
     "transport_error": "Provider unreachable or the request timed out.",
     "http_error": "Provider returned a non-2xx HTTP status.",
     "invalid_response": "Provider returned a malformed or unexpected response.",
@@ -317,7 +342,7 @@ def _tester_result(settings, decision, fallback_reason, payload, tool_type) -> d
     return {
         "success": True,
         "diagnostic": True,
-        "provider": settings.provider,
+        "model_id": settings.model_id,
         "mode": settings.mode,
         "dmss_active": dmss_active,
         "circuit_state": circuit_state,
@@ -368,9 +393,6 @@ def api_decim_safety_test():
     settings = load_decim_settings()
     # Fresh resolver: probe failures must not trip the production breaker.
     resolver = DecimSafetyResolver()
-    provider = resolver.providers.get(settings.provider)
-    if provider is None:
-        return jsonify(_tester_result(settings, None, "provider_unconfigured", payload, tool_type)), 200
 
     decision = None
     fallback_reason = None
@@ -379,7 +401,7 @@ def api_decim_safety_test():
         packet = build_policy_packet(payload, tool_type, "sandboxed_docker",
                                      settings.max_payload_chars)
         # decide() enforces settings.request_timeout_ms for the provider call.
-        decision = provider.decide(packet, settings)
+        decision = resolver.decide(packet, settings)
     except DecimProviderError as exc:
         fallback_reason = exc.category
     except Exception:
@@ -393,22 +415,22 @@ def api_decim_safety_test():
 
 
 # ---------------------------------------------------------------------------
-# Provider endpoint connectivity test (task #895)
+# Decision model connectivity test (task #895)
 #
-# One-click health check behind the "Test" button next to the endpoint field.
+# One-click health check behind the "Test" button next to the model field.
 # It sends a short, fixed diagnostic payload through the real provider adapter
 # (the only contract the provider exposes) and reports whether the endpoint
 # answered with a valid decision.  An isolated resolver is used so failures can
 # never trip the production circuit breaker, and nothing is written to
-# telemetry.  The request may carry an ``endpoint`` override so the UI can test
-# an unsaved value without persisting it first.
+# telemetry.  The request may carry a ``model_id`` override so the UI can test
+# an unsaved selection without persisting it first.
 # ---------------------------------------------------------------------------
 
 _ENDPOINT_TEST_PAYLOAD = "echo ok"
 _ENDPOINT_TEST_DETAIL_MAX = 300
 
 _ENDPOINT_TEST_FAILURE_TEXT = {
-    "provider_unconfigured": "No provider endpoint is configured.",
+    "provider_unconfigured": "No usable decision model is selected (missing, disabled, or its provider has no endpoint).",
     "transport_error": "Endpoint unreachable: connection refused, DNS lookup failed, or the request timed out.",
     "http_error": "Endpoint is reachable but answered with a non-2xx HTTP status.",
     "invalid_response": "Endpoint answered but the body was not a valid decision response.",
@@ -427,9 +449,6 @@ def _probe_endpoint(settings):
 
     # Fresh resolver: a failed health check must not open the production circuit.
     resolver = DecimSafetyResolver()
-    provider = resolver.providers.get(settings.provider)
-    if provider is None:
-        return None, "provider_unconfigured", None
 
     started = time.monotonic()
     try:
@@ -438,7 +457,7 @@ def _probe_endpoint(settings):
             settings.max_payload_chars,
         )
         # decide() enforces settings.request_timeout_ms on the provider call.
-        decision = provider.decide(packet, settings)
+        decision = resolver.decide(packet, settings)
     except DecimProviderError as exc:
         return None, exc.category, int((time.monotonic() - started) * 1000)
     except Exception:
@@ -449,10 +468,10 @@ def _probe_endpoint(settings):
 
 @decim_safety_bp.route("/api/admin/decim-safety/endpoint/test", methods=["POST"])
 def api_decim_safety_endpoint_test():
-    """Connectivity/health check for the configured provider endpoint.
+    """Connectivity/health check for the selected decision model.
 
-    Request (optional body): ``{"endpoint": "<absolute http(s) URL>"}``.  When
-    ``endpoint`` is present and non-empty it is probed *without being persisted*;
+    Request (optional body): ``{"model_id": "<registry model id>"}``.  When
+    ``model_id`` is present and non-empty it is probed *without being persisted*;
     otherwise the saved configuration is used.  The response always carries an
     explicit ``ok`` verdict so the UI can render pass/fail, plus a
     provider-neutral ``message`` explaining any failure.
@@ -472,16 +491,11 @@ def api_decim_safety_endpoint_test():
     if not isinstance(data, dict):
         return jsonify({"success": False, "ok": False, "error": "expected a JSON object"}), 400
 
-    override = data.get("endpoint")
+    override = data.get("model_id")
     if override is not None and not isinstance(override, str):
-        return jsonify({"success": False, "ok": False, "error": "endpoint must be a string"}), 400
+        return jsonify({"success": False, "ok": False, "error": "model_id must be a string"}), 400
     if isinstance(override, str):
         override = override.strip()
-        if override:
-            parsed = urlparse(override)
-            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-                return jsonify({"success": False, "ok": False,
-                                "error": "endpoint must be an absolute http(s) URL"}), 400
 
     retry_after = _tester_rate_limit()
     if retry_after is not None:
@@ -493,7 +507,7 @@ def api_decim_safety_endpoint_test():
     settings = load_decim_settings()
     if override:
         # Probe the typed value without touching persisted configuration.
-        settings = replace(settings, provider_endpoint=override)
+        settings = replace(settings, model_id=override)
 
     decision, fallback_reason, latency_ms = _probe_endpoint(settings)
     ok = decision is not None
@@ -511,7 +525,7 @@ def api_decim_safety_endpoint_test():
         "success": True,
         "ok": ok,
         "diagnostic": True,
-        "provider": settings.provider,
+        "model_id": settings.model_id,
         "mode": settings.mode,
         "dmss_active": bool(settings.enabled) and settings.mode != "off",
         "circuit_state": circuit_state,

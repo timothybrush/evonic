@@ -4,7 +4,7 @@ bash — Bash script execution via the active execution backend.
 The backend is resolved per-session from the backend registry:
   - Default: DockerBackend (sandboxed Docker container, shared with runpy)
   - If sandbox_enabled=0: LocalBackend (direct host subprocess)
-  - If sshc is connected: SSHBackend (remote server)
+  - If a remote workplace is active: RemoteWorkplaceBackend/SSHBackend (remote server)
 
 New backends (E2B, etc.) plug in without changing this file.
 """
@@ -14,6 +14,7 @@ from typing import Optional
 
 from backend.tools.lib.agent_env import build_agent_env
 from backend.tools.lib.exec_backend import registry, validate_env_keys
+from backend.tools.lib.shell_path import ensure_path_env
 
 try:
     from backend.tools.lib.safety_pipeline import (
@@ -146,22 +147,34 @@ def execute(agent: dict, args: dict) -> dict:
     # full-root scan is a performance hazard regardless of trust. It therefore has its
     # own switch (RFS_GUARD_DISABLED=1 env var force-disables it; otherwise the
     # root_fs_scan_guard_enabled DB setting toggled in System > Settings applies),
-    # NOT the per-agent safety checker toggle. We still honour `_skip_safety` (set on
-    # the post-approval re-execution) so an approved scan runs without re-prompting.
+    # NOT the per-agent safety checker toggle. The scan is auto-rejected (no approval
+    # prompt) so the agent falls back to a scoped search instead of stalling the turn.
+    # We still honour `_skip_safety` (set on the post-approval re-execution) so a
+    # script a human already approved runs as approved.
     # ------------------------------------------------------------------
     if _root_fs_scan_guard_enabled() and not should_skip_safety(agent):
         _rfs = check_root_filesystem_scan(script)
         if _rfs:
             return {
-                'error': 'Script requires manual approval before execution',
-                'level': 'requires_approval',
+                'error': (
+                    "REJECTED: Root filesystem scan (`find /`, `tree /`) is not allowed — "
+                    "it walks the entire filesystem and can stall the turn. "
+                    "Do NOT retry it, it will be rejected again.\n\n"
+                    "Explore another way instead:\n"
+                    "- Scope the search to a likely directory (e.g. the working "
+                    "directory, $HOME, /etc, /usr/local, /opt, /var/log).\n"
+                    "- Limit depth, e.g. `find /etc -maxdepth 3 -name '*.conf'` or "
+                    "`ls -la /` to see top-level directories first.\n"
+                    "- Use targeted lookups: `which <cmd>`, `command -v <cmd>`, "
+                    "`locate <name>` (if available), or `grep -rl <text> <dir>`."
+                ),
+                'level': 'dangerous',
                 'score': _rfs['score'],
                 'reasons': _rfs['reasons'],
                 'blocked_patterns': _rfs['blocked_patterns'],
-                'approval_info': _rfs['approval_info'],
                 '_safety': {
-                    'source': 'guard', 'mode': 'root_fs_scan', 'level': 'requires_approval',
-                    'decision': 'review', 'model_decision': None, 'confidence': None,
+                    'source': 'guard', 'mode': 'root_fs_scan', 'level': 'dangerous',
+                    'decision': 'block', 'model_decision': None, 'confidence': None,
                     'event_id': None,
                     'blocked_patterns': list(_rfs['blocked_patterns'])[:6],
                     'reasons': list(_rfs['reasons'])[:4],
@@ -183,6 +196,11 @@ def execute(agent: dict, args: dict) -> dict:
     _safety_prov = verdict_provenance(safety)
 
     if safety['level'] == 'dangerous':
+        # A block that never reached Decim still has to be recorded: without it
+        # the refusal is invisible and the positive class can never accumulate.
+        if _decim_event_id is None and get_safety_pipeline is not None:
+            _decim_event_id = get_safety_pipeline().record_refusal(
+                script, tool_type='bash', agent_context=agent, verdict=safety)
         _update_decim_disposition(_decim_event_id, None, 'blocked')
         return {
             'error': 'Execution blocked by heuristic safety system',
@@ -194,6 +212,11 @@ def execute(agent: dict, args: dict) -> dict:
         }
 
     if safety['level'] == 'requires_approval':
+        # Same reasoning as the block path: an escalation raised by the rules
+        # alone is still a high-stakes attempt worth keeping.
+        if _decim_event_id is None and get_safety_pipeline is not None:
+            _decim_event_id = get_safety_pipeline().record_refusal(
+                script, tool_type='bash', agent_context=agent, verdict=safety)
         _update_decim_disposition(_decim_event_id, None, 'approval_requested')
         return {
             'error': 'Script requires manual approval before execution',
@@ -231,6 +254,9 @@ def execute(agent: dict, args: dict) -> dict:
     # Dispatch to active backend
     # ------------------------------------------------------------------
     backend = registry.get_backend(session_id, agent)
+    # SSH/Evonet backends run `bash -s`, which never sources ~/.profile or
+    # ~/.bashrc: resolve the host's real PATH once (see lib/shell_path.py).
+    env = ensure_path_env(agent, backend, env)
     result = backend.run_bash(script, timeout, env)
 
     # Best-effort lifecycle disposition for Decim telemetry (internal only).
